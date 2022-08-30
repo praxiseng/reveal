@@ -1,0 +1,4 @@
+*.cbor
+*.db
+*.txt
+.idea

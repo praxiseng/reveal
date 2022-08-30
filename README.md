@@ -1,6 +1,6 @@
 # REVal
 
-Framework to reverse engineer binaries and evaluate similarities sector hash, function similarity hash, and data slice hash large collections of files.
+Framework to reverse engineer binaries and evaluate similarities using sector hashes, function similarity hashes, and data slice hashes on large collections of files.
 
 ## Getting started
 
