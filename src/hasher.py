@@ -1,20 +1,54 @@
+#!/usr/bin/env python3
+
 import copy
 import hashlib
 import cbor2
 import os
+import sys
 import itertools
 import heapq
-
+from math import log, log2
+import array
+from collections import defaultdict
 
 MAX_LIST_SIZE = 100
 
 
+class Bunch(dict):
+    def __init__(self, **kw):
+        dict.__init__(self, kw)
+        self.__dict__ = self
+
+
+color = Bunch(
+    red='\033[38;5;9m',
+    lightred='\033[38;5;124m',
+    blue='\033[38;5;24m',
+    lightblue='\033[38;5;51m',
+    green='\033[38;5;112m',
+    lightyellow='\033[38;5;186m',
+    yellow='\033[38;5;226m',
+    purple='\033[38;5;147m',
+    orange='\033[38;5;208m',
+    brown='\033[38;5;94m',
+    white='\033[38;5;255m',
+    pink='\033[38;5;212m',
+    grey='\033[38;5;236m',
+    emphasis='\033[01m',
+    reset='\033[0m',
+    underline='\033[04m',
+    lineclear='\033[2K\r',
+)
+
+
 def coroutine(func):
-    def start(*args,**kwargs):
-        cr = func(*args,**kwargs)
+    def start(*args, **kwargs):
+        cr = func(*args, **kwargs)
         next(cr)
         return cr
+
     return start
+
 
 def get_full_path(path):
     full_path = path
@@ -25,6 +59,7 @@ def get_full_path(path):
         print(e)
     return full_path
 
+
 @coroutine
 def cbor_dump(file_path):
     with open(file_path, 'wb') as out_fd:
@@ -32,10 +67,126 @@ def cbor_dump(file_path):
             entry = (yield)
             cbor2.dump(entry, out_fd)
 
+
+@coroutine
+def sorter(target, key=None):
+    whole_list = []
+    try:
+        while True:
+            item = (yield)
+            whole_list.append(item)
+    except GeneratorExit:
+        for item in sorted(whole_list, key=key):
+            target.send(item)
+
+
 def md5(b):
     m = hashlib.md5()
     m.update(b)
     return m.digest()[:6]
+
+
+def entropy(contents):
+    counts = defaultdict(int)
+    incr = 1 / len(contents)
+    for c in contents:
+        counts[c] += incr
+    return -sum(x * log2(x) for x in counts.values()) / log2(min(256, len(contents)))
+
+
+def word_entropy(block):
+    contents = array.array('H', block)
+    counts = defaultdict(int)
+    incr = 1 / len(contents)
+    for c in contents:
+        counts[c] += incr
+    return -sum(x * log2(x) for x in counts.values()) / log2(min(65536, len(contents)))
+
+
+def dword_entropy(block):
+    contents = array.array('L', block)
+    counts = defaultdict(int)
+    incr = 1 / len(contents)
+    for c in contents:
+        counts[c] += incr
+    return -sum(x * log2(x) for x in counts.values()) / log2(len(contents))
+
+
+def qword_entropy(block):
+    contents = array.array('Q', block)
+    counts = defaultdict(int)
+    incr = 1 / len(contents)
+    for c in contents:
+        counts[c] += incr
+    return -sum(x * log2(x) for x in counts.values()) / log2(len(contents))
+
+
+def nib_entropy_hi(contents):
+    counts = defaultdict(int)
+    incr = 1 / len(contents)
+    for c in contents:
+        counts[c & 0xf0] += incr
+    return -sum(x * log2(x) for x in counts.values()) / log2(min(16, len(contents)))
+
+
+def nib_entropy_lo(contents):
+    counts = defaultdict(int)
+    incr = 1 / len(contents)
+    for c in contents:
+        counts[c & 0xf] += incr
+    # print(dict(counts), contents, sum(counts.values()))
+    return -sum(x * log2(x) for x in counts.values()) / log2(min(16, len(contents)))
+
+
+def _entropy_color(e):
+    highlight = ''
+    if e > 0.90:
+        highlight = color.red
+    elif e > 0.7:
+        highlight = color.yellow
+    elif e > 0.4:
+        highlight = color.green
+    elif e > 0.2:
+        highlight = color.blue
+    return highlight
+
+
+def entropy_color(block, specific_char=None):
+    highlight = ''
+    e = entropy(block)
+    e_hi = nib_entropy_hi(block)
+    e_lo = nib_entropy_lo(block)
+    if e > 0.90 and e_hi > 0.67:
+        highlight = color.red
+    elif e > 0.7:
+        highlight = color.yellow
+    elif e > 0.4:
+        highlight = color.green
+    elif e > 0.2:
+        highlight = color.blue
+
+    if e <= 0.7 and specific_char == 0:
+        highlight = color.grey
+    return highlight
+
+
+def format_entropy(e):
+    highlight = _entropy_color(e)
+    return f'{highlight}{e * 100:3.0f}{color.reset}'
+
+
+def entropyFilterIter(min_entropy, blocks):
+    for block in blocks:
+        e = entropy(block)
+        if e > min_entropy:
+            yield block
+
+
+def sectorEntropyFilter(min_entropy, sectors):
+    for sector in sectors:
+        e = sector.getEntropy()
+        if e > min_entropy:
+            yield sector
 
 
 def btoh(b):
@@ -54,34 +205,101 @@ def pretty_fileset(fileset):
     return f'??? {fileset}'
 
 
-def _uniq(sorted_hashes):
-    getHash = lambda entry: entry[0]
+@coroutine
+def _uniq2(target, keyfunc=lambda entry: entry[0]):
+    """
+    Similar to itertools.groupby, but done as a coroutine
+    """
 
-    for k, g in itertools.groupby(sorted_hashes, key=getHash):
+    curvals = []
+    tgtkey = None
+    try:
+        curval = (yield)
+        curvals = [curval]
+        tgtkey = keyfunc(curval)
+        while True:
+            curval = (yield)
+            curkey = keyfunc(curval)
+
+            if curkey == tgtkey:
+                curvals.append(curval)
+            else:
+                target.send((tgtkey, curvals))
+                tgtkey = curkey
+                curvals = [curval]
+    except GeneratorExit:
+        if curvals:
+            target.send((curkey, curvals))
+        pass
+
+
+from enum import Enum
+
+
+class HashDes(Enum):
+    MATCH_LIST = 0
+    SUMMARY = 1
+
+
+def hdType(hashdes):
+    if len(hashdes) == 2 and isinstance(hashdes[1], list):
+        return HashDes.MATCH_LIST
+    if len(hashdes) == 3:
+        return HashDes.SUMMARY
+
+    print(f"Unknown hashdes type: {hashdes}")
+
+
+def countHashDes(hashdes):
+    hdt = hdType(hashdes)
+    if hdt == HashDes.MATCH_LIST:
+        n_matches = len(hashdes[1])
+        n_files = len(set([file_id for file_id, off in hashdes[1]]))
+        return n_matches, n_files
+    if hdt == HashDes.SUMMARY:
+        n_matches, n_files = hashdes[1:]
+        return n_matches, n_files
+
+
+def countHashDesGroup(g):
+    n_matches = 0
+    n_files = 0
+    file_set = set()
+    for hashdes in g:
+        hdt = hdType(hashdes)
+        if hdt == HashDes.MATCH_LIST:
+            n_matches += len(hashdes[1])
+            file_set |= set([file_id for file_id, off in hashdes[1]])
+        if hdt == HashDes.SUMMARY:
+            n_matches += hashdes[1]
+            n_files += hashdes[2]
+
+    # With MATCH_LIST items, we deduplicate file counts from the same group using a set() on the group.
+    n_files += len(file_set)
+
+    return (n_matches, n_files)
+
+
+@coroutine
+def summarize_large_hash_lists(target, max_list_size=MAX_LIST_SIZE):
+    """ Takes in (key, group) output from uniq2 """
+    while True:
+        k, g = (yield)
         g = list(g)
 
         all_lists = True
-        n_matches = 0
-        n_files = 0
-        file_set = set()
-        for hashdes in g:
-            if len(hashdes) == 2 and isinstance(hashdes[1], list):
-                n_matches += len(hashdes[1])
-                file_set |= set([file_id for file_id, off in hashdes[1]])
-            else:
-                all_lists = False
-            if len(hashdes) == 3:
-                n_matches += hashdes[1]
-                n_files += hashdes[2]
-        n_files += len(file_set)
 
-        if not all_lists or n_matches > MAX_LIST_SIZE:
+        all_lists = all(hdType(hd) == HashDes.MATCH_LIST for hd in g)
+
+        n_matches, n_files = countHashDesGroup(g)
+
+        if not all_lists or n_matches > max_list_size:
             entry = [k, n_matches, n_files]
         else:
             summaries = [e[1] for e in g]
             merged_file_lists = list(itertools.chain.from_iterable(summaries))
             entry = [k, merged_file_lists]
-        yield entry
+        target.send(entry)
 
 
 class SimpleSectorHashList:
@@ -114,7 +332,8 @@ class SimpleSectorHashList:
         to ensure the merged files are using unique IDs and that the record entries are adjusted as
         appropriate.
         '''
-        def thunkIDs(thunk_table, input_gen):
+
+        def thunk_ids(thunk_table, input_gen):
             for entry in input_gen:
                 if len(entry) == 2 and isinstance(entry[1], list):
                     entry[1] = [[thunk_table[fid], offset] for fid, offset in entry[1]]
@@ -131,15 +350,15 @@ class SimpleSectorHashList:
                 file['id'] = fid
 
             flist += hdr_files
-            entryIters.append(thunkIDs(current_thunk, f.readEntries()))
+            entryIters.append(thunk_ids(current_thunk, f.readEntries()))
 
         output = cbor_dump(self.path)
-        self.header = dict(files = flist, blocksize=bs, blockAlgorithm=ba)
+        self.header = dict(files=flist, blocksize=bs, blockAlgorithm=ba)
         output.send(self.header)
-        getHash = lambda entry : entry[0]
+        getHash = lambda e: e[0]
         it = heapq.merge(*entryIters, key=getHash)
         if uniq:
-            it = _uniq(it)
+            output = _uniq2(summarize_large_hash_lists(output))
         for entry in it:
             output.send(entry)
 
@@ -164,7 +383,7 @@ class SimpleSectorHashList:
     def dump(self):
         header = self.readHeader()
         print(f'Dumping {self.path}:')
-        #print(f'  {header}')
+        # print(f'  {header}')
         print(f'  Blocksize {header["blocksize"]}, blockAlgorithm {header["blockAlgorithm"]}')
         print('  Files')
         for file in header['files']:
@@ -174,7 +393,7 @@ class SimpleSectorHashList:
             hashcode = entry[0]
             print(f'  {btoh(hashcode)} {pretty_fileset(entry)}')
 
-    def find_matches(self, other, key = lambda entry : entry[0]):
+    def find_matches(self, other, key=lambda entry: entry[0]):
         '''
         Find the matching values between two lists A and B.  The elements of A and B should be tuples/lists whose first
         element is the hash, and the lists should be sorted by this hash.  If hashes are not pre-grouped (using uniq above),
@@ -211,21 +430,14 @@ class SimpleSectorHashList:
             pass
 
 
-
 class HashedFile:
-    def __init__(self, path, id=None):
-        global current_file_id
-        if id == None:
-            id = current_file_id
-            current_file_id += 1
-
+    def __init__(self, path, id):
         full_path = path
         try:
             full_path = os.path.realpath(path)
         except OSError as e:
             print(f"Error getting real path for {path}")
             print(e)
-        dirname, filename = os.path.split(full_path)
 
         self.path = full_path
         self.id = id
@@ -233,7 +445,6 @@ class HashedFile:
 
     def openFile(self):
         return open(self.path, 'rb')
-
 
     def getWholeFileHash(self):
         if not self.whole_file_hash:
@@ -244,15 +455,82 @@ class HashedFile:
     def getData(self):
         return dict(path=self.path, id=self.id, md5=self.getWholeFileHash())
 
-    def genericSectorHash(self, sectors, output, uniq = True):
+    def entropyValues(self, bs):
+        with self.openFile() as fd:
+            offset = 0
+            while True:
+                buf = fd.read(bs)
+                if not buf or len(buf) < bs:
+                    break
+
+                e = entropy(buf)
+                yield (offset, e)
+
+                offset += bs
+
+
+    def displayEntropyMap(self, bs, COL=128):
+        entropies = self.entropyValues(bs)
+
+        for i, ent in enumerate(entropies):
+            offset, e = ent
+            if i % COL == 0:
+                print(f"{offset:5x}: ", end='')
+
+            print(f'{_entropy_color(e)}#{color.reset}', end='')
+            if (i+1) % COL == 0:
+                print()
+        print()
+
+    def fastEntropyRanges(self, bs, threshold):
+        counts = [0] * 256
+        nonzeros = 0
+        offset = 0
+
+
+        entropies = self.entropyValues(bs)
+        last_hi = False
+        last_change = 0
+        for offset, e in entropies:
+            hi = e>threshold
+            if last_change == offset:
+                last_hi = hi
+                continue
+
+            if hi != last_hi:
+                if last_hi:
+                    yield (last_change, offset)
+                last_hi = hi
+                last_change = offset
+        if last_hi:
+            yield (last_change, offset+bs)
+
+
+
+    def coarsen_ranges(self, ranges, block_size):
+        """ Smooth over entropy holes so we include the adjacent high-entropy blocks. """
+        lo1, hi1 = 0, 0
+        for lo2, hi2 in ranges:
+            if lo2 - hi1 < block_size:
+                hi1 = hi2
+            elif hi1:
+                yield (lo1, hi1)
+                lo1, hi1 = lo2, hi2
+        if hi1:
+            yield (lo1, hi1)
+
+
+
+
+    def genericSectorHash(self, sectors, output, uniq=True):
         # TODO: chunk large lists instead of iterating the whole thing
-        #sorted_sectors = sorted(list(sectors), key=lambda s: (s.hash(), s.file.id, s.offset))
         sorted_sectors = sorted([sector.getHashTuple() for sector in sectors])
         if uniq:
-            sorted_sectors = _uniq(sorted_sectors)
+            # sorted_sectors = _uniq(sorted_sectors)
+
+            output = _uniq2(summarize_large_hash_lists(output))
         for hash_tuple in sorted_sectors:
             output.send(hash_tuple)
-
 
     def genAlignedBlocks(self, bs=10, offset=0, short_blocks=True):
         with self.openFile() as fd:
@@ -278,23 +556,36 @@ class HashedFile:
                 data = data[step:] + in_fd.read(step)
                 offset += step
 
-    def hashBlocksToFile(self, blockSize, outFilePath, short_blocks=False, uniq=True):
-        hl = SimpleSectorHashList(outFilePath)
-        out_file = hl.createFile(self, blockSize, dict(aligned=1, step=blockSize, shortBlocks=short_blocks))
-        block_gen = self.genAlignedBlocks(blockSize, short_blocks=short_blocks)
+    def hashBlocksToFile(self, block_size, out_file_path, short_blocks=False, uniq=True):
+        hl = SimpleSectorHashList(out_file_path)
+        out_file = hl.createFile(self, block_size, dict(aligned=1, step=block_size, shortBlocks=short_blocks))
+        block_gen = self.genAlignedBlocks(block_size, short_blocks=short_blocks)
         self.genericSectorHash(block_gen, out_file, uniq=uniq)
         return hl
 
-    def rollingHashToFile(self, blockSize, outFilePath, short_blocks=False, uniq=True):
-        hl = SimpleSectorHashList(outFilePath)
-        output = hl.createFile(self, blockSize, dict(aligned=0, step=1, shortBlocks=short_blocks))
-        block_gen = self.genRollingBlocks(blockSize, short_blocks=short_blocks)
+    def rollingHashToFile(self, block_size, out_file_path, short_blocks=False, uniq=True):
+        hl = SimpleSectorHashList(out_file_path)
+        block_gen = self.genRollingBlocks(block_size, short_blocks=short_blocks)
+        output = hl.createFile(self, block_size, dict(aligned=0, step=1, shortBlocks=short_blocks))
+
+
+        self.displayEntropyMap(64)
+
+        ranges = self.fastEntropyRanges(64, 0.2)
+        cranges = self.coarsen_ranges(ranges, 512)
+        print("CRanges:")
+        for lo, hi in cranges:
+            print(f"Range {lo:5x}-{hi:5x}")
+        # block_gen = sectorEntropyFilter(0.5, block_gen)
+
+        sys.exit()
+
         self.genericSectorHash(block_gen, output, uniq=uniq)
         return hl
 
     @staticmethod
-    def fromData(self, fileData):
-        return HashedFile(fileData['path'], fileData['id'])
+    def fromData(self, file_data):
+        return HashedFile(file_data['path'], file_data['id'])
 
 
 class Sector:
@@ -305,7 +596,7 @@ class Sector:
         self.end_offset = offset + len(data)
         self._hash = md5(self.data)
         # low-entropy testing hash (4 bits)
-        #self._hash = bytes([md5(self.data)[0]//16])
+        # self._hash = bytes([md5(self.data)[0]//16])
 
     def hash(self):
         return self._hash
@@ -313,6 +604,12 @@ class Sector:
     def getHashTuple(self):
         return (self.hash(), [[self.file.id, self.offset]])
 
+    def getEntropy(self):
+        e = entropy(self.data)
+        we = word_entropy(self.data)
+        de = dword_entropy(self.data)
+        print(f"{self.offset:x} Entropy {e:.2f} {we:.2f} {de:.2f}")
+        return e
 
 
 def grouper(iterable, n):
@@ -325,14 +622,14 @@ def grouper(iterable, n):
             return
         yield itertools.chain((first_el,), chunk_it)
 
+
 def sector_hash(sectors, out_fd):
     # TODO: chunk massively large lists to sort smaller ones then do a file-based mergesort.
     sorted_sectors = sorted(list(sectors), key=lambda s: (s.hash(), s.file.id, s.offset))
     for sector in sorted_sectors:
         cbor2.dump(sector.getHashTuple(), out_fd)
-        print(f'{sector.file.path:20} {btoh(sector.data):>20} {sector.offset:3x}-{sector.end_offset:3x} Hash is {btoh(sector.hash())}')
-
-
+        print(
+            f'{sector.file.path:20} {btoh(sector.data):>20} {sector.offset:3x}-{sector.end_offset:3x} Hash is {btoh(sector.hash())}')
 
 
 class FileDB:
@@ -347,8 +644,7 @@ class FileDB:
 
         self.enum_file_list()
 
-
-        #self.db_file = SimpleSectorHashList(self.get_hashes_path())
+        # self.db_file = SimpleSectorHashList(self.get_hashes_path())
 
     def get_hashes_path(self):
         return os.path.join(self.db_name, 'hashes.cbor')
@@ -360,9 +656,9 @@ class FileDB:
         return SimpleSectorHashList(self.get_hashes_path())
 
     def enum_file_list(self):
-        #self.all_files = []
-        #self.files_by_path = {}
-        #self.files_by_id = {}
+        # self.all_files = []
+        # self.files_by_path = {}
+        # self.files_by_id = {}
 
         self.paths_in_use = set()
         self.fids_in_use = set()
@@ -395,7 +691,6 @@ class FileDB:
         hashlist = hf.hashBlocksToFile(self.blocksize, self._tmpname(hf), self.short_blocks)
         return hashlist
 
-
     def ingest(self, paths, force_existing=False):
         if isinstance(paths, (str, bytes)):
             paths = [paths]
@@ -405,7 +700,6 @@ class FileDB:
             paths = [get_full_path(path) for path in paths]
             paths = [path for path in paths if path not in self.paths_in_use]
             print(f'Paths: {paths}')
-
 
         hash_files = [self._hash_file(path) for path in paths]
 
@@ -429,20 +723,43 @@ class FileDB:
 
         return hash_files
 
-
     def rollingSearch(self, file_to_hash):
-        fid = 0 # We don't need a valid fid
+        fid = 0  # We don't need a valid fid
         hf = HashedFile(file_to_hash, fid)
-
 
         rolling_path = os.path.join(self.db_name, f'{btoh(hf.getWholeFileHash())}_rolling.cbor')
 
         rolling_hashes = hf.rollingHashToFile(self.blocksize, rolling_path, uniq=False)
+
         for a, b in rolling_hashes.find_matches(self.open_db()):
             yield a, b
 
+    def countMatches(self, searchResults, countFiles=False):
+        match_counts = defaultdict(int)
+        for a, b in searchResults:
+            a_start = a[1][0][1]
+            a_end = a_start + self.blocksize
+
+            n_matches, n_files = countHashDes(b)
+            count = n_files if countFiles else n_matches
+
+            print(f"counts from {a_start:x}-{a_end:x} {count}")
+            match_counts[a_start] += count
+            match_counts[a_end] -= count
+
+        counts = []
+        cumulative = 0
+        for off, delta in sorted(match_counts.items()):
+            if not delta:
+                continue
+            cumulative += delta
+            counts.append((off, cumulative))
+        return counts
+
 
 import argparse
+
+
 def main():
     parser = argparse.ArgumentParser(description='Sector hashing tool')
     parser.add_argument('db', metavar='PATH', help='The database path')
@@ -453,7 +770,7 @@ def main():
     args = parser.parse_args()
     db = FileDB(args.db, args.blocksize)
 
-    if(args.ingest):
+    if (args.ingest):
         db.ingest(args.ingest)
 
     if args.search:
@@ -463,6 +780,28 @@ def main():
         for a, b in search_results:
             print(f'  Match {btoh(a[0])} {pretty_fileset(a)}, {pretty_fileset(b)}')
 
+        counts = db.countMatches(search_results, True)
+        print("Match Counts")
+        for off, count in counts:
+            print(f"  {off:5x} {count}")
+
+
+def unique_bytes(contents, exclude=set()):
+    uniq = set()
+    for b in contents:
+        uniq.add(b)
+    return len(uniq - exclude)
+
+
+def test_entropy():
+    for block in [os.urandom(12) for i in range(10)] + [b' ' * 1512] + [
+        b'the quick brown fox jumped over the lazy dog']:
+        e = entropy(block)
+        e_nib_hi = nib_entropy_hi(block)
+        e_nib_lo = nib_entropy_lo(block)
+        print(f"{e:5.2f} {e_nib_hi:5.2f} {e_nib_lo:5.2f}  {block[:35].hex()}")
+
 
 if __name__ == "__main__":
     main()
+    # test_entropy()
