@@ -41,6 +41,45 @@ color = Bunch(
 )
 
 
+class Status:
+    def __init__(self, **vars):
+        self.active_processes = []
+        self.process_txts = {}
+
+        self.vars = vars
+        pass
+
+
+    def start_process(self, process_name, txt_format, **vars):
+        self.active_processes.append(process_name)
+        self.process_txts[process_name] = txt_format
+        self.vars = {**self.vars, **vars}
+        pass
+
+    def _fmt_process(self, process_name):
+        txt = self.process_txts.get(process_name, '')
+        return txt.format(**self.vars)
+
+    def _display(self):
+        proc_txts = [f'{self._fmt_process(name)}' for name in self.active_processes]
+        print(f'{color.lineclear}{" ".join(proc_txts)}', end='')
+
+    def update(self, process_name, **vars):
+        self.vars = {**self.vars, **vars}
+        self._display()
+        pass
+
+    def finish_process(self, process_name, **result):
+        self.vars = {**self.vars, **result}
+        self._display()
+        self.active_processes.remove(process_name)
+
+        if not self.active_processes:
+            print()
+
+status = Status()
+
+
 def coroutine(func):
     def start(*args, **kwargs):
         cr = func(*args, **kwargs)
@@ -193,17 +232,6 @@ def btoh(b):
     return ''.join(format(x, '02x') for x in b)
 
 
-def pretty_fileset(fileset):
-    hash = fileset[0]
-    if len(fileset) == 2 and isinstance(fileset[1], list):
-        foffs = [f'{file_id}:{offset:x}' for file_id, offset in fileset[1]]
-        return f'File/offset {" ".join(foffs)}'
-
-    if len(fileset) == 3:
-        hash, nmatch, nfiles = fileset
-        return f'{nmatch} matches on {nfiles} files'
-    return f'??? {fileset}'
-
 
 @coroutine
 def _uniq2(target, keyfunc=lambda entry: entry[0]):
@@ -248,6 +276,40 @@ def hdType(hashdes):
         return HashDes.SUMMARY
 
     print(f"Unknown hashdes type: {hashdes}")
+
+
+
+def pretty_fileset(fileset, db = None):
+    #hash = fileset[0]
+    hdt = hdType(fileset)
+    if hdt == HashDes.MATCH_LIST:
+        fid_offsets = fileset[1]
+        if db:
+            fid_offsets = [(db.getNameFromFID(fid, str(fid)), offset) for fid, offset in fid_offsets]
+        foffs = [f'{file_id}:{offset:x}' for file_id, offset in fid_offsets]
+        return f'File/offset {" ".join(foffs)}'
+
+    if hdt == HashDes.SUMMARY:
+        hash, nmatch, nfiles = fileset
+        return f'{nmatch} matches on {nfiles} files'
+    return f'??? {fileset}'
+
+def bitmask_fileset(fileset):
+
+    hdt = hdType(fileset)
+    if hdt == HashDes.MATCH_LIST:
+        fid_offsets = fileset[1]
+        max_fid = max(fid for fid, offset in fid_offsets)
+        bitmask = bytearray(b'\x00' * (max_fid//8 + 1))
+        for fid, offset in fid_offsets:
+            bitmask[fid//8] |= 1<<(fid%8)
+        return btoh(bytes(bitmask)).replace('0', ' ')
+
+    if hdt == HashDes.SUMMARY:
+        hash, nmatch, nfiles = fileset
+        return f'{nmatch} matches on {nfiles} files'
+
+    return f'??? {fileset}'
 
 
 def countHashDes(hashdes):
@@ -339,10 +401,12 @@ class SimpleSectorHashList:
                     entry[1] = [[thunk_table[fid], offset] for fid, offset in entry[1]]
                 yield entry
 
+        n_files = 0
         for i, f in enumerate(hash_list_files):
             hdr = copy.deepcopy(headers[i])
             current_thunk = {}
             hdr_files = hdr['files']
+            n_files += len(hdr_files)
             for file in hdr_files:
                 self.max_file_id += 1
                 fid = self.max_file_id
@@ -352,6 +416,11 @@ class SimpleSectorHashList:
             flist += hdr_files
             entryIters.append(thunk_ids(current_thunk, f.readEntries()))
 
+        status.start_process('Merge',
+                             'Merge {files_to_merge} files, {n_hashes} hashes',
+                             files_to_merge = len(hash_list_files),
+                             n_hashes = 0)
+
         output = cbor_dump(self.path)
         self.header = dict(files=flist, blocksize=bs, blockAlgorithm=ba)
         output.send(self.header)
@@ -359,8 +428,15 @@ class SimpleSectorHashList:
         it = heapq.merge(*entryIters, key=getHash)
         if uniq:
             output = _uniq2(summarize_large_hash_lists(output))
+        n_hashes = 0
         for entry in it:
+            n_hashes += 1
             output.send(entry)
+            if (n_hashes % 20000) == 0:
+                status.update('Merge', n_hashes=n_hashes)
+
+        status.finish_process('Merge', n_hashes = n_hashes)
+        print(f'Merged {n_hashes} hashes from {n_files} files, {len(hash_list_files)} new')
 
     def readHeader(self):
         with open(self.path, 'rb') as fd:
@@ -532,11 +608,18 @@ class HashedFile:
 
             output = _uniq2(summarize_large_hash_lists(output))
 
+        status.start_process("Hashing",
+                             'Hashed {sectors_hashed:7} sectors in {filepath}',
+                             sectors_hashed = 0,
+                             filepath = self.path)
         sectors_hashed = 0
         for hash_tuple in sorted_sectors:
             output.send(hash_tuple)
+
+            if (sectors_hashed % 10000) == 0:
+                status.update("Hashing", sectors_hashed=sectors_hashed)
             sectors_hashed += 1
-        print(f"Hashed {sectors_hashed} sectors")
+        status.finish_process("Hashing", sectors_hashed=sectors_hashed)
         return sectors_hashed
 
     def genAlignedBlocks(self, bs=10, offset=0, short_blocks=True):
@@ -569,7 +652,6 @@ class HashedFile:
         out_file = hl.createFile(self, block_size, dict(aligned=1, step=block_size, shortBlocks=short_blocks))
         block_gen = self.genAlignedBlocks(block_size, short_blocks=short_blocks)
         sectors_hashed = self.genericSectorHash(block_gen, out_file, uniq=uniq)
-        print(f'Hashed {sectors_hashed} sectors block size {block_size} in {out_file_path}')
 
         return hl
 
@@ -694,6 +776,8 @@ class FileDB:
         self.paths_in_use = set()
         self.fids_in_use = set()
 
+        self.fid_to_path = {}
+
         if not os.path.exists(self.get_hashes_path()):
             return
 
@@ -708,12 +792,25 @@ class FileDB:
             path = file['path']
             fid = file['id']
 
+
             if path in self.paths_in_use:
                 print(f'Warning: duplication of path {path}')
             if fid in self.fids_in_use:
                 print(f'Warning: duplication of file ID {fid}')
             self.paths_in_use.add(path)
             self.fids_in_use.add(fid)
+
+            self.fid_to_path[fid] = path
+
+    def getPathFromFID(self, fid, default=None):
+        return self.fid_to_path.get(fid, default)
+
+    def getNameFromFID(self, fid, default=None):
+        path = self.getPathFromFID(fid, None)
+        if path==None:
+            return default
+        return os.path.basename(path)
+
 
     def _mk_hashed_file(self, path):
         hf = HashedFile(path, self.next_file_id)
@@ -724,7 +821,7 @@ class FileDB:
         return os.path.join(self.db_name, f'{btoh(hashedFile.getWholeFileHash())}_{hashedFile.id}')
 
     def _hash_file(self, path):
-        print(f'Ingesting {path}')
+        #print(f'Ingesting {path}')
         hf = self._mk_hashed_file(path)
         hashlist = hf.hashBlocksToFile(self.blocksize, self._tmpname(hf), self.short_blocks)
         return hashlist
@@ -734,12 +831,21 @@ class FileDB:
             paths = [paths]
 
         if not force_existing:
-            print(f'Paths in use: {self.paths_in_use}')
             paths = [get_full_path(path) for path in paths]
             paths = [path for path in paths if path not in self.paths_in_use]
-            print(f'Paths: {paths}')
 
-        hash_files = [self._hash_file(path) for path in paths]
+        hash_files = []
+        status.start_process('Ingest',
+                             'Ingest file {ingest_file_index} of {files_to_ingest}',
+                             ingest_file_index=0,
+                             files_to_ingest=len(paths),
+                             filepath = '',
+                             filename = '')
+
+        for i, path in enumerate(paths):
+            status.update('Ingest', ingest_file_index=i, filepath=path, filename=os.path.basename(path))
+            hash_files.append(self._hash_file(path))
+        status.finish_process('Ingest')
 
         merge_path = self.get_merge_path()
         if os.path.exists(merge_path):
@@ -770,18 +876,18 @@ class FileDB:
         rolling_hashes = hf.rollingHashToFile(self.blocksize, rolling_path, uniq=False)
 
         for a, b in rolling_hashes.find_matches(self.open_db()):
-            yield a, b
+            yield a, b, self.blocksize
 
     def countMatches(self, searchResults, countFiles=False):
         match_counts = defaultdict(int)
-        for a, b in searchResults:
+        for a, b, l in searchResults:
             a_start = a[1][0][1]
-            a_end = a_start + self.blocksize
+            a_end = a_start + l #self.blocksize
 
             n_matches, n_files = countHashDes(b)
             count = n_files if countFiles else n_matches
 
-            print(f"counts from {a_start:x}-{a_end:x} {count}")
+            #print(f"counts from {a_start:x}-{a_end:x} {count}")
             match_counts[a_start] += count
             match_counts[a_end] -= count
 
@@ -796,6 +902,34 @@ class FileDB:
 
 
 import argparse
+
+def match_end(a1, a2, l1):
+    fid1, off1 = a1
+    fid2, off2 = a2
+    #print(f'match_end {a1}, {a2}, {l1}')
+    return fid1==fid2 and off2 == off1+l1
+
+def merge_runs(search_results):
+    current_run = None
+    for a, b, l in search_results:
+        if not current_run:
+            current_run = (a, b, l)
+            continue
+        a0, b0, l0 = current_run
+        if all(HashDes.MATCH_LIST == hdType(x) for x in [a0, a, b0, b]) and \
+           all(len(x[1]) == 1 for x in [a0, a]):
+            if match_end(a0[1][0], a[1][0], l0):
+                if all(match_end(b1, b2, l0) for b1, b2 in zip(b0[1], b[1])):
+                    current_run = (a0, b0, l0+l)
+                    continue
+
+        yield current_run
+        current_run = None
+
+    if current_run:
+        yield current_run
+
+
 
 
 def main():
@@ -814,9 +948,14 @@ def main():
     if args.search:
         search_results = list(db.rollingSearch(args.search))
         search_results = sorted(search_results, key=lambda a: a[0][1])
+        search_results = list(merge_runs(search_results))
 
-        for a, b in search_results:
-            print(f'  Match {btoh(a[0])} {pretty_fileset(a)}, {pretty_fileset(b)}')
+        for a, b, l in search_results:
+            print(f'  Match {btoh(a[0])} {a[1][0][1]:5x}+{l:<5x} {pretty_fileset(b, db)}')
+
+
+        for a, b, l in search_results:
+            print(f'  Match {btoh(a[0])} {a[1][0][1]:5x}+{l:<5x} {bitmask_fileset(b)}')
 
         counts = db.countMatches(search_results, True)
         print("Match Counts")
