@@ -507,6 +507,8 @@ class HashedFile:
 
 
 
+
+
     def coarsen_ranges(self, ranges, block_size):
         """ Smooth over entropy holes so we include the adjacent high-entropy blocks. """
         lo1, hi1 = 0, 0
@@ -529,8 +531,13 @@ class HashedFile:
             # sorted_sectors = _uniq(sorted_sectors)
 
             output = _uniq2(summarize_large_hash_lists(output))
+
+        sectors_hashed = 0
         for hash_tuple in sorted_sectors:
             output.send(hash_tuple)
+            sectors_hashed += 1
+        print(f"Hashed {sectors_hashed} sectors")
+        return sectors_hashed
 
     def genAlignedBlocks(self, bs=10, offset=0, short_blocks=True):
         with self.openFile() as fd:
@@ -543,7 +550,7 @@ class HashedFile:
                 yield Sector(self, data, offset)
                 offset += bs
 
-    def genRollingBlocks(self, bs=10, step=1, offset=0, short_blocks=False):
+    def genRollingBlocks(self, bs=10, step=1, offset=0, short_blocks=False, entropy_ranges=None):
         with self.openFile() as in_fd:
             data = in_fd.read(bs)
             while True:
@@ -551,6 +558,7 @@ class HashedFile:
                     break
                 if not short_blocks and len(data) < bs:
                     break
+
                 yield Sector(self, data, offset)
 
                 data = data[step:] + in_fd.read(step)
@@ -560,26 +568,49 @@ class HashedFile:
         hl = SimpleSectorHashList(out_file_path)
         out_file = hl.createFile(self, block_size, dict(aligned=1, step=block_size, shortBlocks=short_blocks))
         block_gen = self.genAlignedBlocks(block_size, short_blocks=short_blocks)
-        self.genericSectorHash(block_gen, out_file, uniq=uniq)
+        sectors_hashed = self.genericSectorHash(block_gen, out_file, uniq=uniq)
+        print(f'Hashed {sectors_hashed} sectors block size {block_size} in {out_file_path}')
+
         return hl
+
+    def filter_sector_entropy(self, sectors, block_size, threshold=0.2, overlap = 32):
+        ranges = self.fastEntropyRanges(64, 0.2)
+        cranges = self.coarsen_ranges(ranges, block_size)
+
+        range_iter = iter(cranges)
+
+
+        lo, hi = 0, 0
+        for sector in sectors:
+            s_lo = sector.offset
+            s_hi = s_lo + block_size
+            if s_lo + overlap > hi:
+                try:
+                    lo, hi = next(range_iter)
+                except StopIteration as e:
+                    break
+
+            if lo <= s_lo:
+                yield sector
+
 
     def rollingHashToFile(self, block_size, out_file_path, short_blocks=False, uniq=True):
         hl = SimpleSectorHashList(out_file_path)
         block_gen = self.genRollingBlocks(block_size, short_blocks=short_blocks)
         output = hl.createFile(self, block_size, dict(aligned=0, step=1, shortBlocks=short_blocks))
 
-
-        self.displayEntropyMap(64)
+        self.displayEntropyMap(64, 64)
 
         ranges = self.fastEntropyRanges(64, 0.2)
-        cranges = self.coarsen_ranges(ranges, 512)
+        cranges = self.coarsen_ranges(ranges, block_size)
         print("CRanges:")
         for lo, hi in cranges:
             print(f"Range {lo:5x}-{hi:5x}")
         # block_gen = sectorEntropyFilter(0.5, block_gen)
 
-        sys.exit()
+        #sys.exit()
 
+        block_gen = self.filter_sector_entropy(block_gen, block_size)
         self.genericSectorHash(block_gen, output, uniq=uniq)
         return hl
 
@@ -667,6 +698,12 @@ class FileDB:
             return
 
         header = self.open_db().readHeader()
+        bs = header['blocksize']
+        if bs != self.blocksize:
+            print(f'{color.red}WARNING: SELECTED BLOCK SIZE IS {self.blocksize}, BUT THE DATABASE SAYS IT IS {bs}.{color.reset}')
+            print(f'{color.red}Changing block size to {bs}{color.reset}')
+            self.blocksize = bs
+
         for file in header['files']:
             path = file['path']
             fid = file['id']
@@ -687,6 +724,7 @@ class FileDB:
         return os.path.join(self.db_name, f'{btoh(hashedFile.getWholeFileHash())}_{hashedFile.id}')
 
     def _hash_file(self, path):
+        print(f'Ingesting {path}')
         hf = self._mk_hashed_file(path)
         hashlist = hf.hashBlocksToFile(self.blocksize, self._tmpname(hf), self.short_blocks)
         return hashlist
