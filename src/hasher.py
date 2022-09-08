@@ -2,6 +2,9 @@
 
 import copy
 import hashlib
+import struct
+import time
+
 import cbor2
 import os
 import sys
@@ -11,8 +14,8 @@ from math import log, log2
 import array
 from collections import defaultdict
 
-MAX_LIST_SIZE = 100
-
+MAX_LIST_SIZE = 1000
+ZEROIZE_X86_PC_REL = True
 
 class Bunch(dict):
     def __init__(self, **kw):
@@ -40,11 +43,15 @@ color = Bunch(
     lineclear='\033[2K\r',
 )
 
+def bg_to_fg(ansi_color):
+    return ansi_color.replace('\033[38;5', '\033[48;5')
+
 
 class Status:
     def __init__(self, **vars):
         self.active_processes = []
         self.process_txts = {}
+        self.start_times = {}
 
         self.vars = vars
         pass
@@ -53,14 +60,31 @@ class Status:
     def start_process(self, process_name, txt_format, **vars):
         self.active_processes.append(process_name)
         self.process_txts[process_name] = txt_format
+        self.start_times[process_name] = time.time()
         self.vars = {**self.vars, **vars}
-        pass
+
+    def get(self, key, default=None):
+        return self.vars.get(key, default)
 
     def _fmt_process(self, process_name):
         txt = self.process_txts.get(process_name, '')
-        return txt.format(**self.vars)
+        return f'{self.getTimeDelta(process_name):5.2f} {txt.format(**self.vars)}'
+
+    def getTimeDelta(self, process_name):
+        return time.time() - self.start_times[process_name]
+
+
+    def getOuterTimeDelta(self):
+        return self.getTimeDelta(self.active_processes[0])
+
+    def getInnerTimeDelta(self):
+        return self.getTimeDelta(self.active_processes[-1])
 
     def _display(self):
+        if not self.active_processes:
+            #print(color.lineclear)
+            return
+
         proc_txts = [f'{self._fmt_process(name)}' for name in self.active_processes]
         print(f'{color.lineclear}{" ".join(proc_txts)}', end='')
 
@@ -72,10 +96,15 @@ class Status:
     def finish_process(self, process_name, **result):
         self.vars = {**self.vars, **result}
         self._display()
+
+        delta = self.getInnerTimeDelta()
+        if(delta > 0.5):
+            print()
+        else:
+            pass #print(color.lineclear, end='')
+
         self.active_processes.remove(process_name)
 
-        if not self.active_processes:
-            print()
 
 status = Status()
 
@@ -209,6 +238,33 @@ def entropy_color(block, specific_char=None):
     return highlight
 
 
+
+def similarity_color(sim):
+    highlight = ''
+    if sim > 0.90:
+        highlight = color.red
+    elif sim > 0.8:
+        highlight = color.orange
+    elif sim > 0.7:
+        highlight = color.yellow
+    elif sim > 0.4:
+        highlight = color.green
+    elif sim > 0.2:
+        highlight = color.blue
+    elif sim > 0.05:
+        highlight = color.lightblue
+    return bg_to_fg(highlight)
+
+def sim_colorize(sim):
+    c = similarity_color(sim)
+    digit = ' '
+    #digit = '0123456789#'[int(sim*10)]
+    #if sim < 0.001:
+    #    digit = ' '
+    return f'{c}{digit}{color.reset}'
+
+
+
 def format_entropy(e):
     highlight = _entropy_color(e)
     return f'{highlight}{e * 100:3.0f}{color.reset}'
@@ -233,34 +289,6 @@ def btoh(b):
 
 
 
-@coroutine
-def _uniq2(target, keyfunc=lambda entry: entry[0]):
-    """
-    Similar to itertools.groupby, but done as a coroutine
-    """
-
-    curvals = []
-    tgtkey = None
-    try:
-        curval = (yield)
-        curvals = [curval]
-        tgtkey = keyfunc(curval)
-        while True:
-            curval = (yield)
-            curkey = keyfunc(curval)
-
-            if curkey == tgtkey:
-                curvals.append(curval)
-            else:
-                target.send((tgtkey, curvals))
-                tgtkey = curkey
-                curvals = [curval]
-    except GeneratorExit:
-        if curvals:
-            target.send((curkey, curvals))
-        pass
-
-
 from enum import Enum
 
 
@@ -278,38 +306,89 @@ def hdType(hashdes):
     print(f"Unknown hashdes type: {hashdes}")
 
 
+def match_list_hash(fids):
+    return md5(str(sorted(set(fids))).encode('ascii'))
 
-def pretty_fileset(fileset, db = None):
+def fid_to_names(fids, db):
+    return [db.getNameFromFID(fid, str(fid)) for fid in fids]
+
+def pretty_fileset(fileset, db = None, overlapping = None):
     #hash = fileset[0]
+
     hdt = hdType(fileset)
     if hdt == HashDes.MATCH_LIST:
         fid_offsets = fileset[1]
+
+        fids = [fid for fid, offset in fid_offsets]
+        list_hash = match_list_hash(fids)
+
+        ofids = fids[:]
+        ohash = list_hash
+        if overlapping:
+            for ovr in overlapping:
+                if hdType(ovr) == HashDes.MATCH_LIST:
+                    ofids.extend([fid for fid, offset in ovr[1]])
+            ohash = match_list_hash(ofids)
+        ofids = sorted(set(ofids))
+
         if db:
             fid_offsets = [(db.getNameFromFID(fid, str(fid)), offset) for fid, offset in fid_offsets]
+            ofids = fid_to_names(ofids, db)
         foffs = [f'{file_id}:{offset:x}' for file_id, offset in fid_offsets]
-        return f'File/offset {" ".join(foffs)}'
+
+        # {" ".join(foffs):50}
+        return f'{btoh(list_hash)} {btoh(ohash)} {len(ofids):4} {" ".join(foffs):50}'
+        #{" ".join(ofids[:30])}  '
 
     if hdt == HashDes.SUMMARY:
         hash, nmatch, nfiles = fileset
         return f'{nmatch} matches on {nfiles} files'
     return f'??? {fileset}'
+
+
+def bitmask_fids(fids):
+    if not fids:
+        return
+    max_fid = max(fids)
+    bitmask = bytearray(b'\x00' * ((max_fid // 8) + 2))
+    for fid in fids:
+        bitmask[fid // 8] |= 1 << (fid % 8)
+    return btoh(bytes(bitmask)).replace('0', ' ')
+
 
 def bitmask_fileset(fileset):
 
     hdt = hdType(fileset)
     if hdt == HashDes.MATCH_LIST:
         fid_offsets = fileset[1]
-        max_fid = max(fid for fid, offset in fid_offsets)
-        bitmask = bytearray(b'\x00' * (max_fid//8 + 1))
-        for fid, offset in fid_offsets:
-            bitmask[fid//8] |= 1<<(fid%8)
-        return btoh(bytes(bitmask)).replace('0', ' ')
+        fids = [fid for fid, offset in fid_offsets]
+        return bitmask_fids(fids)
 
     if hdt == HashDes.SUMMARY:
         hash, nmatch, nfiles = fileset
         return f'{nmatch} matches on {nfiles} files'
 
     return f'??? {fileset}'
+
+def hashdes_files(fileset, db):
+
+    hdt = hdType(fileset)
+    if hdt == HashDes.MATCH_LIST:
+        fid_offsets = fileset[1]
+        fids = [fid for fid, offset in fid_offsets]
+        return ' '.join(sorted(fid_to_names(fids, db)))
+
+    if hdt == HashDes.SUMMARY:
+        hash, nmatch, nfiles = fileset
+        return f'{nmatch} matches on {nfiles} files'
+
+    return f'??? {fileset}'
+
+def match_set_similarity(A, B):
+    A = set(A)
+    B = set(B)
+
+    return len(A&B)/(len(A|B) or 1)
 
 
 def countHashDes(hashdes):
@@ -355,13 +434,48 @@ def summarize_large_hash_lists(target, max_list_size=MAX_LIST_SIZE):
 
         n_matches, n_files = countHashDesGroup(g)
 
-        if not all_lists or n_matches > max_list_size:
+        if (not all_lists) or (n_matches > max_list_size):
+            # Create summary entry
             entry = [k, n_matches, n_files]
         else:
+            # Concatenate lists
             summaries = [e[1] for e in g]
             merged_file_lists = list(itertools.chain.from_iterable(summaries))
             entry = [k, merged_file_lists]
         target.send(entry)
+
+
+class Uniq:
+    def __init__(self):
+        self.n_uniq_sectors = 0
+
+    @coroutine
+    def uniq(self, target, keyfunc=lambda entry: entry[0]):
+        """
+        Similar to itertools.groupby, but done as a coroutine
+        """
+
+        curvals = []
+        tgtkey = None
+        try:
+            curval = (yield)
+            curvals = [curval]
+            tgtkey = keyfunc(curval)
+            while True:
+                curval = (yield)
+                curkey = keyfunc(curval)
+
+                if curkey == tgtkey:
+                    curvals.append(curval)
+                else:
+                    self.n_uniq_sectors += 1
+                    target.send((tgtkey, curvals))
+                    tgtkey = curkey
+                    curvals = [curval]
+        except GeneratorExit:
+            if curvals:
+                self.n_uniq_sectors += 1
+                target.send((curkey, curvals))
 
 
 class SimpleSectorHashList:
@@ -373,7 +487,10 @@ class SimpleSectorHashList:
     def createFile(self, hashed_file, blocksize, blockAlgorithm):
         f = cbor_dump(self.path)
         self.max_file_id = hashed_file.id
-        self.header = dict(files=[hashed_file.getData()], blocksize=blocksize, blockAlgorithm=blockAlgorithm)
+        self.header = dict(files=[hashed_file.getData()],
+                           blocksize=blocksize,
+                           zeroize_x86_pc_rel=ZEROIZE_X86_PC_REL,
+                           blockAlgorithm=blockAlgorithm)
         f.send(self.header)
         return f
 
@@ -383,6 +500,7 @@ class SimpleSectorHashList:
         # TODO: check blocksize, algorithm for consistency
         bs = headers[0]['blocksize']
         ba = headers[0]['blockAlgorithm']
+        zi = headers[0]['zeroize_x86_pc_rel']
         flist = []
         self.max_file_id = 0
 
@@ -422,20 +540,23 @@ class SimpleSectorHashList:
                              n_hashes = 0)
 
         output = cbor_dump(self.path)
-        self.header = dict(files=flist, blocksize=bs, blockAlgorithm=ba)
+        self.header = dict(files=flist, blocksize=bs, zeroize_x86_pc_rel=zi, blockAlgorithm=ba)
         output.send(self.header)
         getHash = lambda e: e[0]
         it = heapq.merge(*entryIters, key=getHash)
+        u = Uniq()
         if uniq:
-            output = _uniq2(summarize_large_hash_lists(output))
+            output = u.uniq(summarize_large_hash_lists(output))
+
+        sum_hashes = status.get('sum_hashes', 0)
         n_hashes = 0
         for entry in it:
             n_hashes += 1
             output.send(entry)
             if (n_hashes % 20000) == 0:
-                status.update('Merge', n_hashes=n_hashes)
+                status.update('Merge', n_hashes=n_hashes, sum_hashes=sum_hashes+n_hashes)
 
-        status.finish_process('Merge', n_hashes = n_hashes)
+        status.finish_process('Merge', n_hashes = n_hashes, sum_hashes=sum_hashes+n_hashes)
         print(f'Merged {n_hashes} hashes from {n_files} files, {len(hash_list_files)} new')
 
     def readHeader(self):
@@ -506,6 +627,113 @@ class SimpleSectorHashList:
             pass
 
 
+
+
+class MemFile:
+    def __init__(self, path):
+        self.n_removed = 0
+
+        with open(path, 'rb') as fd:
+            self.data = fd.read()
+
+        self.offset = 0
+
+        if ZEROIZE_X86_PC_REL:
+            self.zeroize_x86_pc_rel()
+
+    def scan_byte(self, byte_val):
+        offset = -1
+
+        try:
+            while True:
+                offset = self.data.index(byte_val, offset+1)
+                yield offset
+        except ValueError:
+            pass
+
+
+    def zeroize(self, off, nbytes=4):
+        self.n_removed += 1
+        for i in range(off, off+nbytes):
+            self.data[i] = 0
+
+    def zeroize_if(self, off, min_val, max_val):
+        val, = struct.unpack('<i', self.data[off:off+4])
+        if min_val <= val < max_val:
+            self.zeroize(off)
+
+    def zeroize_x86_pc_rel(self):
+        MAX_REL = 2<<20
+        MIN_REL = -MAX_REL
+
+
+        n_removed = 0
+
+        self.data = bytearray(self.data)
+
+        relcall = 0xe8
+        reljmp = 0xe9
+        offset = -1
+        for opcode in [relcall, reljmp]:
+            for offset in self.scan_byte(opcode):
+                self.zeroize(offset+1)
+
+
+        lea = 0x8d
+        mov_load = 0x8b
+        mov_store = 0x89
+        cmp = 0x39
+        movsxd = 0x63
+        coprocessor = [0xdb, 0xdb]
+        modrm_instructions =  [lea, mov_load, mov_store, cmp, movsxd] + coprocessor
+
+        for opcode in modrm_instructions:
+            for offset in self.scan_byte(opcode):
+                modrm = self.data[offset+1]
+                is_pc_rel = (modrm & 0xc7) == 0x05
+
+                if not is_pc_rel:
+                    continue
+
+                self.zeroize(offset + 2)
+
+        offset = -1
+
+        for offset in self.scan_byte(0x0f):
+            opcode_byte2 = self.data[offset+1]
+
+            jmp_codes = list(range(0x80, 0x90))
+            movdqa = 0x6f
+
+            if opcode_byte2 not in jmp_codes + [movdqa]:
+                continue
+
+            self.zeroize(offset + 2)
+
+        for offset in self.scan_byte(0xff):
+            opcode_byte2 = self.data[offset+1]
+
+            near_call = 0x15
+            if opcode_byte2 not in [near_call]:
+                continue
+
+            self.zeroize(offset+2)
+
+        #print(f'Removed {n_removed}')
+        self.data = bytes(self.data)
+
+
+    def read(self, nbytes=None):
+        end = self.offset+nbytes if nbytes != None else None
+        data = self.data[self.offset:end]
+        self.offset += len(data)
+        return data
+
+    def __enter__(self):
+        return self
+    def __exit__(self ,type, value, traceback):
+        return False
+
 class HashedFile:
     def __init__(self, path, id):
         full_path = path
@@ -519,8 +747,17 @@ class HashedFile:
         self.id = id
         self.whole_file_hash = None
 
+        self.sectors_entropy_hi = 0
+        self.sectors_entropy_lo = 0
+
+        self.n_uniq_sectors = 0
+
+        self.filesize = os.path.getsize(path)
+
+
     def openFile(self):
-        return open(self.path, 'rb')
+        #return open(self.path, 'rb')
+        return MemFile(self.path)
 
     def getWholeFileHash(self):
         if not self.whole_file_hash:
@@ -588,7 +825,12 @@ class HashedFile:
     def coarsen_ranges(self, ranges, block_size):
         """ Smooth over entropy holes so we include the adjacent high-entropy blocks. """
         lo1, hi1 = 0, 0
+        first = True
         for lo2, hi2 in ranges:
+            if first:
+                first = False
+                lo1, hi1 = lo2, hi2
+                continue
             if lo2 - hi1 < block_size:
                 hi1 = hi2
             elif hi1:
@@ -597,30 +839,57 @@ class HashedFile:
         if hi1:
             yield (lo1, hi1)
 
-
-
-
     def genericSectorHash(self, sectors, output, uniq=True):
         # TODO: chunk large lists instead of iterating the whole thing
-        sorted_sectors = sorted([sector.getHashTuple() for sector in sectors])
-        if uniq:
-            # sorted_sectors = _uniq(sorted_sectors)
-
-            output = _uniq2(summarize_large_hash_lists(output))
 
         status.start_process("Hashing",
-                             'Hashed {sectors_hashed:7} sectors in {filepath}',
-                             sectors_hashed = 0,
-                             filepath = self.path)
+                             'Hash  ' + (' '*8) + '{sectors_hashed:<7} {filepath}',
+                             sectors_hashed = 0, filepath = self.path)
+
+        sector_list = []
+        sum_hashes = status.get('sum_hashes', 0)
         sectors_hashed = 0
+        for sector in sectors:
+            sector_list.append(sector.getHashTuple())
+            if (sectors_hashed % 20000) == 0:
+                status.update("Hashing", sectors_hashed=sectors_hashed, sum_hashes=sum_hashes+sectors_hashed)
+            sectors_hashed += 1
+        status.finish_process("Hashing", sectors_hashed=sectors_hashed, sum_hashes=sum_hashes+sectors_hashed)
+
+
+        status.start_process("Sorting", 'Sort  ' + (' '*8) + '{sectors_hashed:<7} {filepath}')
+        sorted_sectors = sorted(sector_list)
+        status.finish_process("Sorting")
+
+        u = Uniq()
+        if uniq:
+            output = u.uniq(summarize_large_hash_lists(output))
+        else:
+            u.n_uniq_sectors = len(sorted_sectors)
+
+        status.start_process("Output", 'Write {n_uniq_sectors:7}/{sectors_written:<7} {filepath}',
+                             sectors_written=0,
+                             n_uniq_sectors=u.n_uniq_sectors)
+
+        sectors_written = 0
+
+        sum_uniq = status.get('sum_uniq_hashes', 0)
         for hash_tuple in sorted_sectors:
+            sectors_written += 1
             output.send(hash_tuple)
 
-            if (sectors_hashed % 10000) == 0:
-                status.update("Hashing", sectors_hashed=sectors_hashed)
-            sectors_hashed += 1
-        status.finish_process("Hashing", sectors_hashed=sectors_hashed)
-        return sectors_hashed
+            if sectors_written % 10000 == 0:
+                status.update('Output',
+                              sectors_written=sectors_written,
+                              n_uniq_sectors=self.n_uniq_sectors,
+                              sum_uniq_hashes=sum_uniq+u.n_uniq_sectors)
+
+        status.finish_process('Output',
+                              sectors_written=sectors_written,
+                              n_uniq_sectors=self.n_uniq_sectors,
+                              sum_uniq_hashes=sum_uniq+u.n_uniq_sectors)
+
+        return (sectors_hashed, self.n_uniq_sectors)
 
     def genAlignedBlocks(self, bs=10, offset=0, short_blocks=True):
         with self.openFile() as fd:
@@ -655,14 +924,21 @@ class HashedFile:
 
         return hl
 
-    def filter_sector_entropy(self, sectors, block_size, threshold=0.2, overlap = 32):
+    def filter_sector_entropy(self, sectors, block_size, threshold=0.2, overlap = None):
         ranges = self.fastEntropyRanges(64, 0.2)
         cranges = self.coarsen_ranges(ranges, block_size)
+
+        if overlap == None:
+            overlap = block_size // 2
+
+        cranges = list(cranges)
 
         range_iter = iter(cranges)
 
 
         lo, hi = 0, 0
+        self.sectors_entropy_hi = 0
+        self.sectors_entropy_lo = 0
         for sector in sectors:
             s_lo = sector.offset
             s_hi = s_lo + block_size
@@ -673,12 +949,18 @@ class HashedFile:
                     break
 
             if lo <= s_lo:
+                self.sectors_entropy_hi += 1
                 yield sector
+            else:
+                self.sectors_entropy_lo += 1
+        #print(f'Entropy: {self.sectors_entropy_lo} low, {self.sectors_entropy_hi} high')
 
 
-    def rollingHashToFile(self, block_size, out_file_path, short_blocks=False, uniq=True):
+
+    def rollingHashToFile(self, block_size, out_file_path, step=1, short_blocks=False, uniq=True):
         hl = SimpleSectorHashList(out_file_path)
-        block_gen = self.genRollingBlocks(block_size, short_blocks=short_blocks)
+
+        block_gen = self.genRollingBlocks(block_size, step=step, short_blocks=short_blocks)
         output = hl.createFile(self, block_size, dict(aligned=0, step=1, shortBlocks=short_blocks))
 
         self.displayEntropyMap(64, 64)
@@ -787,6 +1069,14 @@ class FileDB:
             print(f'{color.red}WARNING: SELECTED BLOCK SIZE IS {self.blocksize}, BUT THE DATABASE SAYS IT IS {bs}.{color.reset}')
             print(f'{color.red}Changing block size to {bs}{color.reset}')
             self.blocksize = bs
+        global ZEROIZE_X86_PC_REL
+
+        db_zeroize = header.get('zeroize_x86_pc_rel', False)
+        if ZEROIZE_X86_PC_REL != db_zeroize:
+
+            print(f'{color.red}WARNING: ZEROIZE_X86_PC_REL IS {ZEROIZE_X86_PC_REL}, BUT THE DATABASE SAYS IT IS {db_zeroize}.{color.reset}')
+            print(f'{color.red}Changing ZEROIZE_X86_PC_REL to {db_zeroize}{color.reset}')
+            ZEROIZE_X86_PC_REL = db_zeroize
 
         for file in header['files']:
             path = file['path']
@@ -836,14 +1126,16 @@ class FileDB:
 
         hash_files = []
         status.start_process('Ingest',
-                             'Ingest file {ingest_file_index} of {files_to_ingest}',
+                             'Ingest {ingest_file_index:4} of {files_to_ingest:<4} {sum_uniq_hashes:7}/{sum_hashes:<7} hashes',
                              ingest_file_index=0,
                              files_to_ingest=len(paths),
                              filepath = '',
-                             filename = '')
+                             filename = '',
+                             sum_hashes = 0,
+                             sum_uniq_hashes = 0)
 
         for i, path in enumerate(paths):
-            status.update('Ingest', ingest_file_index=i, filepath=path, filename=os.path.basename(path))
+            status.update('Ingest', ingest_file_index=i+1, filepath=path, filename=os.path.basename(path))
             hash_files.append(self._hash_file(path))
         status.finish_process('Ingest')
 
@@ -867,13 +1159,13 @@ class FileDB:
 
         return hash_files
 
-    def rollingSearch(self, file_to_hash):
+    def rollingSearch(self, file_to_hash, step=1):
         fid = 0  # We don't need a valid fid
         hf = HashedFile(file_to_hash, fid)
 
         rolling_path = os.path.join(self.db_name, f'{btoh(hf.getWholeFileHash())}_rolling.cbor')
 
-        rolling_hashes = hf.rollingHashToFile(self.blocksize, rolling_path, uniq=False)
+        rolling_hashes = hf.rollingHashToFile(self.blocksize, rolling_path, step=step, uniq=False)
 
         for a, b in rolling_hashes.find_matches(self.open_db()):
             yield a, b, self.blocksize
@@ -893,13 +1185,64 @@ class FileDB:
 
         counts = []
         cumulative = 0
+
+        last_off_delta = (0, 0, 0)
         for off, delta in sorted(match_counts.items()):
             if not delta:
                 continue
             cumulative += delta
-            counts.append((off, cumulative))
+
+            if last_off_delta:
+                counts.append(last_off_delta)
+            last_off_delta = (off, cumulative, off - last_off_delta[0])
+        counts.append(last_off_delta or (0, 0, 0))
         return counts
 
+    def countMatches2(self, searchResults, countFiles=False):
+        ''' Like countMatches, but account for overlapping intervals by incrementing/decrementing steps.
+        '''
+        match_counts = defaultdict(lambda:defaultdict(int))
+        for a, b, l in searchResults:
+            a_start = a[1][0][1]
+            a_end = a_start + l #self.blocksize
+
+            n_matches, n_files = countHashDes(b)
+            count = n_files if countFiles else n_matches
+
+            #print(f"counts from {a_start:x}-{a_end:x} {count}")
+            if hdType(b) == HashDes.MATCH_LIST:
+                for b_fid, b_offset in b[1]:
+                    match_counts[a_start][b_fid] += 1
+                    match_counts[a_end][b_fid] -= 1
+            else:
+                match_counts[a_start][-1] += count
+                match_counts[a_end][-1] -= count
+
+        counts = []
+        cumulative = defaultdict(int)
+
+        last_off_delta = None
+        for off, deltas in sorted(match_counts.items()):
+            if not deltas:
+                continue
+
+            for fid, delta in deltas.items():
+                cumulative[fid] += delta
+
+            files_present = sorted(set(fid for fid, count in cumulative.items() if count > 0))
+
+            total = sum(count for count in cumulative.values())
+
+            if last_off_delta:
+                o, t, r, p = last_off_delta
+                #if o+r >= off:
+                r = off - o
+                counts.append((o, t, r, p))
+
+            run_len = off - (last_off_delta or [0])[0]
+            last_off_delta = (off, total, run_len, files_present)
+        counts.append(last_off_delta or (0, 0, 0, []))
+        return counts
 
 import argparse
 
@@ -909,27 +1252,259 @@ def match_end(a1, a2, l1):
     #print(f'match_end {a1}, {a2}, {l1}')
     return fid1==fid2 and off2 == off1+l1
 
+
+class MatchRun:
+    def __init__(self, a, b, l):
+        self.a = a
+        self.b = b
+        self.l = l
+
+        self.offset = a[1][0][1]
+        self.end = self.offset + self.l
+
+        self.merged = False
+
+        self.fds = None
+        if HashDes.MATCH_LIST == hdType(b):
+            self.fds = set(fid for fid, offset in b[1])
+
+        print(f'mr {self.offset:x}-{self.end:x} {self.l:x}')
+
+    def can_merge(self, other):
+        if other.offset != self.end:
+            return False
+        if not all(HashDes.MATCH_LIST == hdType(x) for x in [self.b, other.b]):
+            return False
+        if self.fds != other.fds:
+            return False
+        return True
+
+    def merge(self, other):
+        self.end = other.end
+        self.l += other.l
+        other.merged = True
+
 def merge_runs(search_results):
-    current_run = None
+    active_runs = []
+
+    result_offsets = {}
+
+    match_runs = []
     for a, b, l in search_results:
-        if not current_run:
-            current_run = (a, b, l)
+        mr = MatchRun(a, b, l)
+        match_runs.append(mr)
+
+        result_offsets[mr.offset] = mr
+
+    for mr in match_runs:
+        if mr.merged:
             continue
-        a0, b0, l0 = current_run
-        if all(HashDes.MATCH_LIST == hdType(x) for x in [a0, a, b0, b]) and \
-           all(len(x[1]) == 1 for x in [a0, a]):
-            if match_end(a0[1][0], a[1][0], l0):
-                if all(match_end(b1, b2, l0) for b1, b2 in zip(b0[1], b[1])):
-                    current_run = (a0, b0, l0+l)
-                    continue
+        while True:
+            other = result_offsets.get(mr.end, None)
+            if not other:
+                break
+            if not mr.can_merge(other):
+                break
+            mr.merge(other)
 
+    for mr in match_runs:
+        if not mr.merged:
+            yield (mr.a, mr.b, mr.l)
+
+
+
+    '''
+    for a, b, l in search_results:
+        appended = False
+
+        for current_run in active_runs:
+            a0, b0, l0 = current_run
+
+
+            if all(HashDes.MATCH_LIST == hdType(x) for x in [a0, a, b0, b]) and \
+               all(len(x[1]) == 1 for x in [a0, a]):
+                if match_end(a0[1][0], a[1][0], l0):
+                    if all(match_end(b1, b2, l0) for b1, b2 in zip(b0[1], b[1])):
+                        current_run[2] += l
+                        appended = True
+                        #current_run = [a0, b0, l0+l]
+                        break
+
+
+        if not appended:
+            active_runs.append([a, b, l])
+
+        for aged_index, current_run in enumerate(active_runs):
+
+            a0, b0, l0 = current_run
+
+            if any(HashDes.MATCH_LIST != hdType(x) for x in [a0, b0]):
+                continue
+
+            a_offset = a[1][0][1]
+            a0_offset = a0[1][0][1]
+            if a_offset > a0_offset+l0+1024:
+                continue
+
+            break
+
+        # produce items in the same order we were given them
+        inactive = active_runs[:aged_index]
+        active_runs = active_runs[aged_index:]
+
+        for run in inactive:
+            yield run
+
+    for current_run in active_runs:
         yield current_run
-        current_run = None
-
-    if current_run:
-        yield current_run
+    '''
 
 
+class Matchset:
+    def __init__(self, off, runlen, present):
+        self.off = off
+        self.runlen = runlen
+        self.present = present
+        self.nearest = []
+
+        self.label = None
+
+        self.labels = []
+
+    def similarity(self, other):
+        return match_set_similarity(self.present, other.present)
+
+    def rank_close(self, matchsets):
+        if not self.nearest:
+            self.nearest = sorted([(self.similarity(other), other) for other in matchsets], key=lambda x: -x[0])
+        return self.nearest
+
+    def neighbors(self, matchsets, min_sim):
+        return {other.off : other for sim, other in self.rank_close(matchsets) if sim > min_sim}
+
+
+def DBSCAN(DB, min_sim, minPts):
+    C = 0
+    for P in DB:
+        P.label = None
+
+    for P in DB:
+        if P.label != None:
+            continue
+        N = P.neighbors(DB, min_sim)
+        if len(N) < minPts:
+            P.label = -1 # Noise
+            continue
+        C += 1
+
+        S_set = set(N.keys())
+        S = list(N.values())
+        i = 0 # have to do it this way because we are changing the list size
+        while i < len(S):
+            Q = S[i]
+            i += 1
+
+            # Change noise to border point
+            if Q.label == -1:
+                Q.label = C
+
+            if Q.label != None:
+                continue
+
+            Q.label = C
+
+
+            N = Q.neighbors(DB, min_sim)
+            if len(N) >= minPts: # Handle core point
+                added_one = False
+                for off, other in N.items():
+                    if off in S_set:
+                        continue
+                    added_one = True
+                    S_set.add(off)
+                    S.append(other)
+
+
+class FileByteMatch:
+    def __init__(self, fid):
+        self.fid = fid
+
+        self.total_bytes_matched = 0
+        self.offset_length = []
+
+
+    def add_match(self, offset, length):
+        self.total_bytes_matched += length
+        self.offset_length.append((offset, length))
+
+    def sort(self):
+        self.offset_length = sorted(self.offset_length)
+
+    def set_similarity(self, other):
+        pass
+
+
+
+def per_file_amount_matched(search_results, db):
+    bytes_matched = defaultdict(int)
+    fbms = {}
+    for a, b, l in search_results:
+        if hdType(b) != HashDes.MATCH_LIST:
+            continue
+
+        for fid, offset in b[1]:
+            if fid not in fbms:
+                fbms[fid] = FileByteMatch(fid)
+            fbm = fbms[fid]
+            fbm.add_match(offset, l)
+
+
+    file_matches = sorted(fbms.values(), key = lambda fbm : -fbm.total_bytes_matched)
+
+    for fbm in file_matches:
+        name = db.getNameFromFID(fbm.fid, str(fbm.fid))
+
+        offsets = sorted(fbm.offset_length)
+        offset_txt = ' '.join(f'{off:x}' for off, len in offsets)
+        print(f'{fbm.fid:4} {fbm.total_bytes_matched:8} {name:24} {offset_txt[:200]}')
+
+
+
+
+
+def group_matchsets(matchsets, db):
+
+    try_dbscan = False
+    if try_dbscan:
+        for threshold in [0.4, 0.45, 0.5, 0.55, 0.6, 0.7, 0.8, 0.9, 0.95, 0.97, 0.99, 0.995]:
+            DBSCAN(matchsets, threshold, 2)
+            for ms in matchsets:
+                ms.labels.append(ms.label)
+
+        matchsets = sorted(matchsets, key=lambda ms : ms.labels)
+
+
+    for ms in matchsets:
+        sims = [ms.similarity(other) for other in matchsets]
+        # simtxt = [f'{sim*100:3.0f}' for sim in sims]
+        simtxt = [sim_colorize(sim) for sim in sims]
+        lbltxt = ','.join(str(lbl) for lbl in ms.labels if lbl!=-1)
+        print(f'{ms.off:8x}+{ms.runlen:<5x} {lbltxt:24} {len(ms.present):5}  {"".join(simtxt)}')
+
+
+    for ms in matchsets:
+        ms.rank_close(matchsets)
+
+        close = ms.nearest[:3]   #[other for sim, other in sims if sim > 0.9]
+
+        close_txt = [f'{sim:.3f}:{other.off:x}+{other.runlen:x}' for sim, other in close]
+
+        lbltxt = ','.join(str(lbl) for lbl in ms.labels if lbl!=-1)
+
+        filetxt = ' '.join(sorted(fid_to_names(ms.present, db)))
+
+        print(f'{ms.off:8x}+{ms.runlen:<5x}  {lbltxt:24} {len(ms.present):5}  {filetxt[:300]}')
+        #{"    ".join(close_txt)}
 
 
 def main():
@@ -937,30 +1512,88 @@ def main():
     parser.add_argument('db', metavar='PATH', help='The database path')
     parser.add_argument('ingest', nargs='*', help='Files to ingest into the database')
     parser.add_argument('--search', nargs='?', help='File to perform a rolling search')
+    parser.add_argument('--step', metavar='N', type=int, default=1, help='Step size for rolling search.')
     parser.add_argument('--blocksize', nargs='?', type=int, default=512, help="Block size")
+    parser.add_argument('--zeroize', action='store_true',
+                        help='Zero out immediate operands that look like x86_64 PC relative addresses')
 
     args = parser.parse_args()
+
+    global ZEROIZE_X86_PC_REL
+    ZEROIZE_X86_PC_REL = args.zeroize
+
+
     db = FileDB(args.db, args.blocksize)
 
     if (args.ingest):
         db.ingest(args.ingest)
 
+
     if args.search:
-        search_results = list(db.rollingSearch(args.search))
+
+        search_results = list(db.rollingSearch(args.search, step=args.step))
         search_results = sorted(search_results, key=lambda a: a[0][1])
         search_results = list(merge_runs(search_results))
 
+        recent_results = []
+        print('MATCH LISTS')
         for a, b, l in search_results:
-            print(f'  Match {btoh(a[0])} {a[1][0][1]:5x}+{l:<5x} {pretty_fileset(b, db)}')
+            offset = a[1][0][1]
+
+            overlapping = [b0 for offset0, len0, b0 in recent_results if offset0 <= offset <= offset0+len0]
+
+            n_matches, n_files = countHashDes(b)
+
+            print(f'  Match {btoh(a[0])} {n_matches:3}/{n_files:<3} {offset:5x}+{l:<5x} {pretty_fileset(b, db, overlapping)}')
+
+            recent_results.append((offset, l, b))
+            if len(recent_results) > 512:
+                recent_results = recent_results[-512:]
 
 
+        print('MATCH BITMASK')
         for a, b, l in search_results:
-            print(f'  Match {btoh(a[0])} {a[1][0][1]:5x}+{l:<5x} {bitmask_fileset(b)}')
+            n_matches, n_files = countHashDes(b)
+            present_txt = hashdes_files(b, db)
+            #present_txt = bitmask_fileset(b)
+            print(f'  Match {btoh(a[0])} {n_matches:3}/{n_files:<3} {a[1][0][1]:5x}+{l:<5x} {present_txt}')
 
-        counts = db.countMatches(search_results, True)
+        counts = db.countMatches2(search_results, True)
+
+        #per_file_amount_matched(search_results, db)
+
         print("Match Counts")
-        for off, count in counts:
-            print(f"  {off:5x} {count}")
+
+
+        last_present = set()
+
+        matchsets = []
+        prior_sets = set()
+
+        for off, count, runlen, present in counts:
+            list_hash = match_list_hash(present)
+
+            sim = match_set_similarity(present, last_present)
+            last_present = set(present)
+
+            s = frozenset(present)
+
+            if present and s not in prior_sets:
+                prior_sets.add(s)
+                matchsets.append(Matchset(off, runlen, s))
+
+
+            present_txt = ' '.join(sorted(fid_to_names(present, db)))
+            #present_txt = bitmask_fids(present)
+            print(f"  {off:5x}+{runlen:<5x} {sim:5.3f} {count:4} {len(present):4}   {present_txt[:300]}")
+            #present_txt = ' '.join(sorted(fid_to_names(present, db)))
+            #print(f"  {off:5x}+{runlen:<5x} {count:4} {' '.join(present_txt[:30])}"
+
+
+        #group_matchsets(matchsets, db)
+
+
+
 
 
 def unique_bytes(contents, exclude=set()):
@@ -982,3 +1615,14 @@ def test_entropy():
 if __name__ == "__main__":
     main()
     # test_entropy()
+
+'''
+from tkinter import *
+from tkinter import ttk
+root = Tk()
+frm = ttk.Frame(root, padding=10)
+frm.grid()
+ttk.Label(frm, text="Hello World!").grid(column=0, row=0)
+ttk.Button(frm, text="Quit", command=root.destroy).grid(column=1, row=0)
+root.mainloop()
+'''
