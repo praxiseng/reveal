@@ -183,7 +183,24 @@ class FileDB:
         return counts
 
     def countMatches2(self, searchResults, countFiles=False):
-        ''' Like countMatches, but account for overlapping intervals by incrementing/decrementing steps.
+        '''
+            Collect the count of matches and set of files that match (if match lists are given) for every offset
+            in searchResults.
+
+            For example, countMatches2 would take the following overlapping match ranges:
+            1 {Foo}       ####################
+            1 {Bar}                 #####################
+
+            and convert them into a form that lets us easily count the set of overlapping files:
+            1 {Foo}       ##########
+            2 {Foo, Bar}            ##########
+            1 {Bar}                           ###########
+
+        '''
+
+        ''' match_counts maps offsets in the search file to a file-count dictionary.  The file-count dictionary
+            maps file IDs to the count of matches in that file. Summarized matches without file lists accumulate
+            counts using file ID -1.
         '''
         match_counts = defaultdict(lambda:defaultdict(int))
         for a, b, l in searchResults:
