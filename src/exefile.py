@@ -1,5 +1,4 @@
 
-from elftools.elf.elffile import ELFFile
 import struct
 
 
@@ -61,11 +60,21 @@ class Thunk:
 
 class ELFThunks:
     def __init__(self, path):
+        self.file_to_va_thunk = None
+        self.thunks = []
+
+        from elftools.elf.elffile import ELFFile
+        from elftools.common.exceptions import ELFError
         with open(path, 'rb') as f:
-            elffile = ELFFile(f)
+            try:
+                elffile = ELFFile(f)
+            except ELFError:
+                return
 
             self.section_thunk = Thunk('File Offset', 'Virtual Address')
             self.segment_thunk = Thunk('File Offset', 'Virtual Address')
+            self.file_to_va_thunk = self.section_thunk
+            self.thunks = [self.segment_thunk, self.section_thunk]
 
             for sect in elffile.iter_sections():
                 flags = sect.header['sh_flags']
@@ -87,8 +96,7 @@ class ELFThunks:
                 self.segment_thunk.add((sh_offset,file_size), (sh_addr,mem_size), meta)
 
 
-                print(
-                    f'Section {sect.name:20} {flag_txt} {sh_offset:6x}+{file_size:<6x}  {sh_addr:6x}+{mem_size:<6x} {sect.header}')
+                #print(f'Section {sect.name:20} {flag_txt} {sh_offset:6x}+{file_size:<6x}  {sh_addr:6x}+{mem_size:<6x} {sect.header}')
 
             for seg in elffile.iter_segments():
                 p_type = seg.header['p_type']
@@ -107,6 +115,41 @@ class ELFThunks:
                 self.section_thunk.add((p_offset, p_filesz), (p_vaddr, p_memsz), meta)
 
 
-                print(f'Segment {p_type:20} {flagtxt} {p_offset:6x}+{p_filesz:<6x} {p_vaddr:6x}+{p_memsz:<6x} {dict(seg.header)}')
+                #print(f'Segment {p_type:20} {flagtxt} {p_offset:6x}+{p_filesz:<6x} {p_vaddr:6x}+{p_memsz:<6x} {dict(seg.header)}')
 
 
+    def find_thunks(self, address, only_nearest=True):
+        for thunk in self.thunks:
+            thunk_results = []
+            for a, b, meta in thunk.all_in_range(address):
+                trans = try_translate(address, a, b)
+                thunk_off = address - a[0]
+
+                thunk_results.append((meta['name'], trans, thunk_off, meta))
+
+            if only_nearest:
+                if not thunk_results:
+                    continue
+                thunk_results = sorted(thunk_results, key = lambda result : result[2])
+                yield thunk_results[0]
+            else:
+                for result in thunk_results:
+                    yield result
+
+    def thunk_txt(self, address):
+        txt = []
+        for name, new_addr, thunk_off, meta in self.find_thunks(address):
+            if name:
+                txt.append(f'{name}+{thunk_off:x}')
+                break
+            else:
+                txt.append('??')
+        return ' '.join(txt)
+
+    def get_va(self, file_offset):
+        if not self.file_to_va_thunk:
+            return
+
+        for a, b, meta in self.file_to_va_thunk.all_in_range(file_offset):
+            trans = try_translate(file_offset, a, b)
+            return trans

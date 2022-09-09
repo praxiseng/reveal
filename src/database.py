@@ -31,36 +31,9 @@ class FileDB:
     def open_db(self):
         return HashListFile(self.get_hashes_path())
 
+    '''
 
-    def add_file_offset_thunk(self, thunk):
-        self.file_offset_thunks.append(thunk)
-
-    def find_thunks(self, address, only_nearest=True):
-        for thunk in self.file_offset_thunks:
-            thunk_results = []
-            for a, b, meta in thunk.all_in_range(address):
-                trans = try_translate(address, a, b)
-                thunk_off = address - a[0]
-
-                thunk_results.append((meta['name'], trans, thunk_off, meta))
-
-            if only_nearest:
-                if not thunk_results:
-                    continue
-                thunk_results = sorted(thunk_results, key = lambda result : result[2])
-                yield thunk_results[0]
-            else:
-                for result in thunk_results:
-                    yield result
-
-    def thunk_txt(self, address):
-        txt = []
-        for name, new_addr, thunk_off, meta in self.find_thunks(address):
-            if name:
-                txt.append(f'{name}+{thunk_off:x}')
-            else:
-                txt.append('??')
-        return ' '.join(txt)
+    '''
 
     def enum_file_list(self):
         # self.all_files = []

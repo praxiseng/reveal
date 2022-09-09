@@ -214,10 +214,6 @@ def per_file_amount_matched(search_results, db):
         offset_txt = ' '.join(f'{off:x}' for off, len in offsets)
         print(f'{fbm.fid:4} {fbm.total_bytes_matched:8} {name:24} {offset_txt[:200]}')
 
-
-
-
-
 def group_matchsets(matchsets, db):
 
     try_dbscan = False
@@ -251,4 +247,8 @@ def group_matchsets(matchsets, db):
 
         print(f'{ms.off:8x}+{ms.runlen:<5x}  {lbltxt:24} {len(ms.present):5}  {filetxt[:300]}')
         #{"    ".join(close_txt)}
+
+
+
+
 

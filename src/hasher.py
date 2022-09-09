@@ -72,8 +72,6 @@ def main():
 
     if args.search:
         et = ELFThunks(args.search)
-        db.add_file_offset_thunk(et.section_thunk)
-        db.add_file_offset_thunk(et.segment_thunk)
 
 
         search_results = list(db.rollingSearch(args.search, step=args.step))
@@ -105,9 +103,11 @@ def main():
 
             present_txt = ' '.join(sorted(fid_to_names(present, db)))
 
-            tt = db.thunk_txt(off)
+            tt = et.thunk_txt(off)
+            va = et.get_va(off)
+            va_txt = f'{va:x}' if va != None else ''
             #present_txt = bitmask_fids(present)
-            print(f"  {off:5x}+{runlen:<5x} {tt:32} {sim:5.3f} {count:4} {len(present):4}   {present_txt[:300]}")
+            print(f"  {off:5x}+{runlen:<5x} {va_txt:8} {tt:20} {sim:5.3f} {count:4} {len(present):4}   {present_txt[:300]}")
             #present_txt = ' '.join(sorted(fid_to_names(present, db)))
             #print(f"  {off:5x}+{runlen:<5x} {count:4} {' '.join(present_txt[:30])}"
 
