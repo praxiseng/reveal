@@ -143,104 +143,21 @@ class FileDB:
 
         return hash_files
 
-    def rollingSearch(self, file_to_hash, step=1):
+    def rollingSearch(self, file_to_hash, step=1, entropy_threshold=0.2, limit_range=None):
         fid = 0  # We don't need a valid fid
-        hf = HashedFile(file_to_hash, fid)
+        hashed_file = HashedFile(file_to_hash, fid)
 
-        rolling_path = os.path.join(self.db_name, f'{btoh(hf.getWholeFileHash())}_rolling.cbor')
+        rolling_path = os.path.join(self.db_name, f'{btoh(hashed_file.getWholeFileHash())}_rolling.cbor')
 
-        rolling_hashes = hf.rollingHashToFile(self.blocksize, rolling_path, step=step, uniq=False)
+        hash_list_file = hashed_file.rollingHashToFile(self.blocksize,
+                                                       rolling_path,
+                                                       step=step,
+                                                       uniq=False,
+                                                       entropy_threshold=entropy_threshold,
+                                                       limit_range=limit_range)
+        return hash_list_file
 
-        for a, b in rolling_hashes.find_matching_items(self.open_db()):
+    def gen_matches_from_hash_list(self, hash_list_file):
+        for a, b in hash_list_file.find_matching_items(self.open_db()):
             yield a, b, self.blocksize
 
-    def countMatches(self, searchResults, countFiles=False):
-        match_counts = defaultdict(int)
-        for a, b, l in searchResults:
-            a_start = a[1][0][1]
-            a_end = a_start + l #self.blocksize
-
-            n_matches, n_files = countHashDes(b)
-            count = n_files if countFiles else n_matches
-
-            #print(f"counts from {a_start:x}-{a_end:x} {count}")
-            match_counts[a_start] += count
-            match_counts[a_end] -= count
-
-        counts = []
-        cumulative = 0
-
-        last_off_delta = (0, 0, 0)
-        for off, delta in sorted(match_counts.items()):
-            if not delta:
-                continue
-            cumulative += delta
-
-            if last_off_delta:
-                counts.append(last_off_delta)
-            last_off_delta = (off, cumulative, off - last_off_delta[0])
-        counts.append(last_off_delta or (0, 0, 0))
-        return counts
-
-    def countMatches2(self, searchResults, countFiles=False):
-        '''
-            Collect the count of matches and set of files that match (if match lists are given) for every offset
-            in searchResults.
-
-            For example, countMatches2 would take the following overlapping match ranges:
-            1 {Foo}       ####################
-            1 {Bar}                 #####################
-
-            and convert them into a form that lets us easily count the set of overlapping files:
-            1 {Foo}       ##########
-            2 {Foo, Bar}            ##########
-            1 {Bar}                           ###########
-
-        '''
-
-        ''' match_counts maps offsets in the search file to a file-count dictionary.  The file-count dictionary
-            maps file IDs to the count of matches in that file. Summarized matches without file lists accumulate
-            counts using file ID -1.
-        '''
-        match_counts = defaultdict(lambda:defaultdict(int))
-        for a, b, l in searchResults:
-            a_start = a[1][0][1]
-            a_end = a_start + l #self.blocksize
-
-            n_matches, n_files = countHashDes(b)
-            count = n_files if countFiles else n_matches
-
-            #print(f"counts from {a_start:x}-{a_end:x} {count}")
-            if hdType(b) == HashDes.MATCH_LIST:
-                for b_fid, b_offset in b[1]:
-                    match_counts[a_start][b_fid] += 1
-                    match_counts[a_end][b_fid] -= 1
-            else:
-                match_counts[a_start][-1] += count
-                match_counts[a_end][-1] -= count
-
-        counts = []
-        cumulative = defaultdict(int)
-
-        last_off_delta = None
-        for off, deltas in sorted(match_counts.items()):
-            if not deltas:
-                continue
-
-            for fid, delta in deltas.items():
-                cumulative[fid] += delta
-
-            files_present = sorted(set(fid for fid, count in cumulative.items() if count > 0))
-
-            total = sum(count for count in cumulative.values())
-
-            if last_off_delta:
-                o, t, r, p = last_off_delta
-                #if o+r >= off:
-                r = off - o
-                counts.append((o, t, r, p))
-
-            run_len = off - (last_off_delta or [0])[0]
-            last_off_delta = (off, total, run_len, files_present)
-        counts.append(last_off_delta or (0, 0, 0, []))
-        return counts

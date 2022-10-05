@@ -4,6 +4,7 @@ import hashlib
 import cbor2
 import os
 
+import itertools
 
 class Bunch(dict):
     def __init__(self, **kw):
@@ -32,6 +33,18 @@ color = Bunch(
 )
 
 
+
+def grouper(iterable, n):
+    it = iter(iterable)
+    while True:
+        chunk_it = itertools.islice(it, n)
+        try:
+            first_el = next(chunk_it)
+        except StopIteration:
+            return
+        yield itertools.chain((first_el,), chunk_it)
+
+
 def bg_to_fg(ansi_color):
     return ansi_color.replace('\033[38;5', '\033[48;5')
 
@@ -51,6 +64,7 @@ class Status:
         self.process_txts[process_name] = txt_format
         self.start_times[process_name] = time.time()
         self.vars = {**self.vars, **vars}
+        self._display()
 
     def get(self, key, default=None):
         return self.vars.get(key, default)

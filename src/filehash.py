@@ -28,7 +28,7 @@ class Sector:
         e = entropy(self.data)
         we = word_entropy(self.data)
         de = dword_entropy(self.data)
-        print(f"{self.offset:x} Entropy {e:.2f} {we:.2f} {de:.2f}")
+        #print(f"{self.offset:x} Entropy {e:.2f} {we:.2f} {de:.2f}")
         return e
 
 
@@ -42,7 +42,9 @@ class MemFile:
         self.offset = 0
 
         if globals.ZEROIZE_X86_PC_REL:
+            status.start_process('Zeroize', 'Zeroizing    {n_zeroize:8} {filename}', n_zeroize=0, filename=path)
             self.zeroize_x86_pc_rel()
+            status.finish_process('Zeroize', n_zeroize=self.n_removed)
 
     def scan_byte(self, byte_val):
         offset = -1
@@ -57,6 +59,9 @@ class MemFile:
 
     def zeroize(self, off, nbytes=4):
         self.n_removed += 1
+
+        if self.n_removed % 100000 == 0:
+            status.update('Zeroize', n_zeroize=self.n_removed)
         for i in range(off, off+nbytes):
             self.data[i] = 0
 
@@ -125,19 +130,22 @@ class MemFile:
         #print(f'Removed {n_removed}')
         self.data = bytes(self.data)
 
-
-    def read(self, nbytes=None):
-        end = self.offset+nbytes if nbytes != None else None
-        data = self.data[self.offset:end]
-        self.offset += len(data)
-        return data
-
     def __enter__(self):
-        return self
+        return FileCursor(self)
+
     def __exit__(self ,type, value, traceback):
         return False
 
+class FileCursor:
+    def __init__(self, memfile):
+        self.offset = 0
+        self.memfile = memfile
 
+    def read(self, nbytes=None):
+        end = self.offset+nbytes if nbytes != None else None
+        data = self.memfile.data[self.offset:end]
+        self.offset += len(data)
+        return data
 
 
 class HashedFile:
@@ -156,14 +164,22 @@ class HashedFile:
         self.sectors_entropy_hi = 0
         self.sectors_entropy_lo = 0
 
+        self.entropy_block_size = -1
+        self.entropy_ranges = []
+        self.entropy_threshold = 0.2
+
         self.n_uniq_sectors = 0
 
         self.filesize = os.path.getsize(path)
 
+        self.file_data = None
+
 
     def openFile(self):
         #return open(self.path, 'rb')
-        return MemFile(self.path)
+        if not self.file_data:
+            self.file_data = MemFile(self.path)
+        return self.file_data
 
     def getWholeFileHash(self):
         if not self.whole_file_hash:
@@ -304,8 +320,13 @@ class HashedFile:
                 yield Sector(self, data, offset)
                 offset += bs
 
-    def genRollingBlocks(self, bs=10, step=1, offset=0, short_blocks=False, entropy_ranges=None):
+    def genRollingBlocks(self, bs=10, step=1, offset=0, short_blocks=False, entropy_ranges=None, limit_range=None):
         with self.openFile() as in_fd:
+            lo, hi = None, None
+            if limit_range:
+                lo, hi = limit_range
+                offset+=lo
+                in_fd.read(lo)
             data = in_fd.read(bs)
             while True:
                 if not data:
@@ -318,25 +339,38 @@ class HashedFile:
                 data = data[step:] + in_fd.read(step)
                 offset += step
 
-    def hashBlocksToFile(self, block_size, out_file_path, short_blocks=False, uniq=True):
+                if hi and offset >= hi:
+                    break
+
+
+    def hashBlocksToFile(self, block_size, out_file_path, short_blocks=False, uniq=True, entropy_threshold=0.2):
         hl = HashListFile(out_file_path)
-        out_file = hl.createFile(self, block_size, globals.ZEROIZE_X86_PC_REL, dict(aligned=1, step=block_size, shortBlocks=short_blocks))
+        out_file = hl.createFile(self,
+                                 block_size,
+                                 globals.ZEROIZE_X86_PC_REL,
+                                 dict(aligned=1, step=block_size, shortBlocks=short_blocks),
+                                 self.get_entropy_ranges(block_size, entropy_threshold=entropy_threshold))
         block_gen = self.genAlignedBlocks(block_size, short_blocks=short_blocks)
         sectors_hashed = self.genericSectorHash(block_gen, out_file, uniq=uniq)
 
         return hl
 
-    def filter_sector_entropy(self, sectors, block_size, threshold=0.2, overlap = None):
-        ranges = self.fastEntropyRanges(64, 0.2)
-        cranges = self.coarsen_ranges(ranges, block_size)
+    def get_entropy_ranges(self, block_size, entropy_threshold):
+        if self.entropy_block_size != block_size or self.entropy_threshold != entropy_threshold:
 
+            self.entropy_block_size = block_size
+            self.entropy_threshold = entropy_threshold
+
+            ranges = self.fastEntropyRanges(64, entropy_threshold)
+            coarse_ranges = self.coarsen_ranges(ranges, block_size)
+            self.entropy_ranges = list(coarse_ranges)
+        return self.entropy_ranges
+
+    def filter_sector_entropy(self, sectors, block_size, threshold=0.2, overlap=None):
         if overlap == None:
-            overlap = block_size // 2
+            overlap = block_size//2
 
-        cranges = list(cranges)
-
-        range_iter = iter(cranges)
-
+        range_iter = iter(self.get_entropy_ranges(block_size, threshold))
 
         lo, hi = 0, 0
         self.sectors_entropy_hi = 0
@@ -357,25 +391,34 @@ class HashedFile:
                 self.sectors_entropy_lo += 1
         #print(f'Entropy: {self.sectors_entropy_lo} low, {self.sectors_entropy_hi} high')
 
-
-    def rollingHashToFile(self, block_size, out_file_path, step=1, short_blocks=False, uniq=True):
+    def rollingHashToFile(self,
+                          block_size,
+                          out_file_path,
+                          step=1,
+                          short_blocks=False,
+                          uniq=True,
+                          entropy_threshold=0.2,
+                          limit_range=None):
         hl = HashListFile(out_file_path)
 
-        block_gen = self.genRollingBlocks(block_size, step=step, short_blocks=short_blocks)
-        output = hl.createFile(self, block_size, globals.ZEROIZE_X86_PC_REL, dict(aligned=0, step=1, shortBlocks=short_blocks))
+        block_gen = self.genRollingBlocks(block_size, step=step, short_blocks=short_blocks, limit_range=limit_range)
+        output = hl.createFile(self,
+                               block_size,
+                               globals.ZEROIZE_X86_PC_REL,
+                               dict(aligned=0, step=1, shortBlocks=short_blocks),
+                               self.get_entropy_ranges(block_size, entropy_threshold))
 
         self.displayEntropyMap(64, 64)
 
-        ranges = self.fastEntropyRanges(64, 0.2)
-        cranges = self.coarsen_ranges(ranges, block_size)
+        ranges = self.get_entropy_ranges(block_size, entropy_threshold)
         print("CRanges:")
-        for lo, hi in cranges:
+        for lo, hi in ranges:
             print(f"Range {lo:5x}-{hi:5x}")
         # block_gen = sectorEntropyFilter(0.5, block_gen)
 
         #sys.exit()
 
-        block_gen = self.filter_sector_entropy(block_gen, block_size)
+        block_gen = self.filter_sector_entropy(block_gen, block_size, threshold=entropy_threshold)
         self.genericSectorHash(block_gen, output, uniq=uniq)
         return hl
 

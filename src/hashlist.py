@@ -164,13 +164,14 @@ class HashListFile:
         self.header = None
         self.max_file_id = 0
 
-    def createFile(self, hashed_file, blocksize, zeroize, blockAlgorithm):
+    def createFile(self, hashed_file, blocksize, zeroize, blockAlgorithm, entropy_ranges):
         f = cbor_dump(self.path, globals.CLUMP_SIZE)
         self.max_file_id = hashed_file.id
         self.header = dict(files=[hashed_file.getData()],
                            blocksize=blocksize,
                            zeroize_x86_pc_rel=zeroize,
-                           blockAlgorithm=blockAlgorithm)
+                           blockAlgorithm=blockAlgorithm,
+                           entropy_ranges=entropy_ranges)
         f.send(self.header)
         return f
 
@@ -239,6 +240,7 @@ class HashListFile:
         status.finish_process('Merge', n_hashes = n_hashes, sum_hashes=sum_hashes+n_hashes)
         print(f'Merged {n_hashes} hashes from {n_files} files, {len(hash_list_files)} new')
 
+
     def readHeader(self):
         with open(self.path, 'rb') as fd:
             self.header = cbor2.load(fd)
@@ -263,6 +265,12 @@ class HashListFile:
     def delete_file(self):
         if os.path.exists(self.path):
             os.remove(self.path)
+
+    def getEntropyRanges(self):
+        hdr = self.readHeader()
+        if not hdr:
+            return []
+        return hdr.get('entropy_ranges', [])
 
     def dump(self):
         header = self.readHeader()
