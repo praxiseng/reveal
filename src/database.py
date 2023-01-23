@@ -108,6 +108,18 @@ class FileDB:
             paths = [get_full_path(path) for path in paths]
             paths = [path for path in paths if path not in self.paths_in_use]
 
+        # Expand directories
+        file_paths = []
+        for path in paths:
+            if os.path.isdir(path):
+                for root, dirs, files in os.walk(path):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        file_paths.append(file_path)
+            else:
+                file_paths.append(path)
+        paths = file_paths
+
         hash_files = []
         status.start_process('Ingest',
                              'Ingest {ingest_file_index:4} of {files_to_ingest:<4} {sum_uniq_hashes:7}/{sum_hashes:<7} hashes',

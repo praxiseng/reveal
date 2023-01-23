@@ -222,7 +222,6 @@ class HashedFile:
         nonzeros = 0
         offset = 0
 
-
         entropies = self.entropyValues(bs)
         last_hi = False
         last_change = 0
