@@ -5,7 +5,7 @@ binaries, storing their sector hashes in a database, and searching that database
 file-of-interest is called Match Set Analysis.
 
 To see Match Set Analysis used with Data Flow Slices, see the related project 
-[Flowslicer](github.com/praxiseng/flowslicer).
+[Flowslicer](https://github.com/praxiseng/flowslicer).
 
 ## Getting started
 
