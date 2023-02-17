@@ -4,7 +4,7 @@ import copy
 import itertools
 import cbor2
 import heapq
-import globals
+import reveal_globals
 
 #MAX_LIST_SIZE = 1000
 #ZEROIZE_X86_PC_REL = True
@@ -165,7 +165,7 @@ class HashListFile:
         self.max_file_id = 0
 
     def createFile(self, hashed_file, blocksize, zeroize, blockAlgorithm, entropy_ranges):
-        f = cbor_dump(self.path, globals.CLUMP_SIZE)
+        f = cbor_dump(self.path, reveal_globals.CLUMP_SIZE)
         self.max_file_id = hashed_file.id
         self.header = dict(files=[hashed_file.getData()],
                            blocksize=blocksize,
@@ -220,14 +220,14 @@ class HashListFile:
                              files_to_merge = len(hash_list_files),
                              n_hashes = 0)
 
-        output = cbor_dump(self.path, globals.CLUMP_SIZE)
+        output = cbor_dump(self.path, reveal_globals.CLUMP_SIZE)
         self.header = dict(files=flist, blocksize=bs, zeroize_x86_pc_rel=zi, blockAlgorithm=ba)
         output.send(self.header)
         getHash = lambda e: e[0]
         it = heapq.merge(*entryIters, key=getHash)
         u = Uniq()
         if uniq:
-            output = u.uniq(summarize_large_hash_lists(output, globals.MAX_LIST_SIZE))
+            output = u.uniq(summarize_large_hash_lists(output, reveal_globals.MAX_LIST_SIZE))
 
         sum_hashes = status.get('sum_hashes', 0)
         n_hashes = 0
@@ -238,7 +238,7 @@ class HashListFile:
                 status.update('Merge', n_hashes=n_hashes, sum_hashes=sum_hashes+n_hashes)
 
         status.finish_process('Merge', n_hashes = n_hashes, sum_hashes=sum_hashes+n_hashes)
-        print(f'Merged {n_hashes} hashes from {n_files} files, {len(hash_list_files)} new')
+        print(f'{color.lineclear}Merged {n_hashes} hashes from {n_files} files, {len(hash_list_files)} new')
 
 
     def readHeader(self):

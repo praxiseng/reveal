@@ -1,8 +1,6 @@
-#!/usr/bin/env python3
-
 from match import *
 from database import *
-import globals
+import reveal_globals
 
 
 import argparse
@@ -11,12 +9,13 @@ def hex_int(x):
     return int(x, 16)
 
 def main():
-    globals.init_globals()
+    reveal_globals.init_globals()
 
     parser = argparse.ArgumentParser(description='Sector hashing tool')
     parser.add_argument('db', metavar='PATH', help='The database path')
     parser.add_argument('ingest', nargs='*', help='Files to ingest into the database')
     parser.add_argument('--search', nargs='?', help='File to perform a rolling search')
+    parser.add_argument('--parallelism', metavar="N", type=int, default=1, help='Number of parallel file hashing routines.')
     parser.add_argument('--step', metavar='N', type=int, default=1, help='Step size for rolling search.')
     parser.add_argument('--blocksize', nargs='?', type=int, default=512, help="Block size")
     parser.add_argument('--zeroize', action='store_true',
@@ -26,12 +25,12 @@ def main():
 
     args = parser.parse_args()
 
-    globals.ZEROIZE_X86_PC_REL = args.zeroize
+    reveal_globals.ZEROIZE_X86_PC_REL = args.zeroize
 
     db = FileDB(args.db, args.blocksize)
 
     if args.ingest:
-        db.ingest(args.ingest)
+        db.ingest(args.ingest, parallelism=args.parallelism)
 
     if args.search:
         et = ELFThunks(args.search)
