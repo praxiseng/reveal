@@ -3,13 +3,14 @@ import queue
 from filehash import *
 from exefile import *
 from collections import defaultdict
+import reveal_globals as rg
 
 import multiprocessing as mp
 
 class FileDB:
     def __init__(self, db_name, blocksize, short_blocks=False):
         self.db_name = db_name
-        self.next_file_id = 1
+        #self.next_file_id = 1
 
         os.makedirs(db_name, exist_ok=True)
 
@@ -30,10 +31,6 @@ class FileDB:
 
     def open_db(self):
         return HashListFile(self.get_hashes_path())
-
-    '''
-
-    '''
 
     def enum_file_list(self):
         # self.all_files = []
@@ -56,11 +53,11 @@ class FileDB:
             self.blocksize = bs
 
         db_zeroize = header.get('zeroize_x86_pc_rel', False)
-        if reveal_globals.ZEROIZE_X86_PC_REL != db_zeroize:
+        if rg.globs.ZEROIZE_X86_PC_REL != db_zeroize:
 
-            print(f'{color.red}WARNING: ZEROIZE_X86_PC_REL IS {reveal_globals.ZEROIZE_X86_PC_REL}, BUT THE DATABASE SAYS IT IS {db_zeroize}.{color.reset}')
+            print(f'{color.red}WARNING: ZEROIZE_X86_PC_REL IS {rg.globs.ZEROIZE_X86_PC_REL}, BUT THE DATABASE SAYS IT IS {db_zeroize}.{color.reset}')
             print(f'{color.red}Changing ZEROIZE_X86_PC_REL to {db_zeroize}{color.reset}')
-            reveal_globals.ZEROIZE_X86_PC_REL = db_zeroize
+            rg.globs.ZEROIZE_X86_PC_REL = db_zeroize
 
 
         for file in header['files']:
@@ -87,8 +84,8 @@ class FileDB:
 
 
     def _mk_hashed_file(self, path):
-        hf = HashedFile(path, self.next_file_id)
-        self.next_file_id += 1
+        hf = HashedFile(path, 1)
+        #self.next_file_id += 1
         return hf
 
     def _tmpname(self, hashedFile):
@@ -136,16 +133,10 @@ class FileDB:
             hashlist_path = self.hash_file((i+1, path))
             hash_file = HashListFile(hashlist_path)
             hash_files.append(hash_file)
-            #status.update('Ingest', ingest_file_index=i+1, filepath=path, filename=os.path.basename(path))
-            #hash_files.append(self._hash_file(path))
         return hash_files
 
 
-    def hash_files_parallel_callback(self, in_files, out_files, files_processed, global_state={}):
-
-        for key, value in global_state.items():
-            globals()[key] = value
-
+    def hash_files_parallel_callback(self, in_files, out_files, files_processed):
         while True:
             path = in_files.get()
 
@@ -166,11 +157,10 @@ class FileDB:
         procs = []
         inQ = mp.Queue()
         outQ = mp.Queue()
-        global_state = dict()
 
         for i in range(parallelism):
             p = mp.Process(target=self.hash_files_parallel_callback,
-                        args=(inQ, outQ, files_processed, global_state))
+                           args=(inQ, outQ, files_processed))
             procs.append(p)
             p.start()
 

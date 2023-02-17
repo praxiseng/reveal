@@ -1,6 +1,6 @@
 from match import *
 from database import *
-import reveal_globals
+import reveal_globals as rg
 
 
 import argparse
@@ -9,8 +9,6 @@ def hex_int(x):
     return int(x, 16)
 
 def main():
-    reveal_globals.init_globals()
-
     parser = argparse.ArgumentParser(description='Sector hashing tool')
     parser.add_argument('db', metavar='PATH', help='The database path')
     parser.add_argument('ingest', nargs='*', help='Files to ingest into the database')
@@ -25,7 +23,7 @@ def main():
 
     args = parser.parse_args()
 
-    reveal_globals.ZEROIZE_X86_PC_REL = args.zeroize
+    rg.globs.ZEROIZE_X86_PC_REL = args.zeroize
 
     db = FileDB(args.db, args.blocksize)
 
@@ -51,21 +49,14 @@ def main():
             mc.display_comparison(last_mc, db, et)
             last_mc = mc
 
-        sg = SpikeGrouper(args.blocksize)
-        spikes = list(sg.group_spikes(counts))
-        '''
-        last_mc = None
-        for s in spikes:
-            s.print_summary(db, et)
-            #print(f'{s.offset:5x}+{s.length:<5x}  {len(s.ascent):3} {len(s.plateau):3} {len(s.descent):3}')
-            for mc in s.ascent + s.plateau + s.descent:
-                mc.display_comparison(last_mc, db, et)
-                last_mc = mc
-        '''
+        if True:
+            sg = SpikeGrouper(args.blocksize)
+            spikes = list(sg.group_spikes(counts))
 
-        print('Summary of item groups')
-        for s in spikes:
-            s.print_summary(db, et, hash_list_file.getEntropyRanges())
+
+            print('Summary of item groups')
+            for s in spikes:
+                s.print_summary(db, et, hash_list_file.getEntropyRanges())
 
 
 

@@ -4,7 +4,7 @@ import copy
 import itertools
 import cbor2
 import heapq
-import reveal_globals
+import reveal_globals as rg
 
 #MAX_LIST_SIZE = 1000
 #ZEROIZE_X86_PC_REL = True
@@ -165,7 +165,7 @@ class HashListFile:
         self.max_file_id = 0
 
     def createFile(self, hashed_file, blocksize, zeroize, blockAlgorithm, entropy_ranges):
-        f = cbor_dump(self.path, reveal_globals.CLUMP_SIZE)
+        f = cbor_dump(self.path, rg.globs.CLUMP_SIZE)
         self.max_file_id = hashed_file.id
         self.header = dict(files=[hashed_file.getData()],
                            blocksize=blocksize,
@@ -220,14 +220,14 @@ class HashListFile:
                              files_to_merge = len(hash_list_files),
                              n_hashes = 0)
 
-        output = cbor_dump(self.path, reveal_globals.CLUMP_SIZE)
+        output = cbor_dump(self.path, rg.globs.CLUMP_SIZE)
         self.header = dict(files=flist, blocksize=bs, zeroize_x86_pc_rel=zi, blockAlgorithm=ba)
         output.send(self.header)
         getHash = lambda e: e[0]
         it = heapq.merge(*entryIters, key=getHash)
         u = Uniq()
         if uniq:
-            output = u.uniq(summarize_large_hash_lists(output, reveal_globals.MAX_LIST_SIZE))
+            output = u.uniq(summarize_large_hash_lists(output, rg.globs.MAX_LIST_SIZE))
 
         sum_hashes = status.get('sum_hashes', 0)
         n_hashes = 0

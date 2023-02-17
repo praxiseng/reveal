@@ -1,10 +1,10 @@
 
-import reveal_globals
+import reveal_globals as rg
 import os
 from util import *
 from hashlist import *
 from entropy import *
-
+import struct
 
 
 
@@ -41,7 +41,7 @@ class MemFile:
 
         self.offset = 0
 
-        if reveal_globals.ZEROIZE_X86_PC_REL:
+        if rg.globs.ZEROIZE_X86_PC_REL:
             status.start_process('Zeroize', 'Zeroizing    {n_zeroize:8} {filename}', n_zeroize=0, filename=path)
             self.zeroize_x86_pc_rel()
             status.finish_process('Zeroize', n_zeroize=self.n_removed)
@@ -280,7 +280,7 @@ class HashedFile:
 
         u = Uniq()
         if uniq:
-            output = u.uniq(summarize_large_hash_lists(output, reveal_globals.MAX_LIST_SIZE))
+            output = u.uniq(summarize_large_hash_lists(output, rg.globs.MAX_LIST_SIZE))
         else:
             u.n_uniq_sectors = len(sorted_sectors)
 
@@ -346,7 +346,7 @@ class HashedFile:
         hl = HashListFile(out_file_path)
         out_file = hl.createFile(self,
                                  block_size,
-                                 reveal_globals.ZEROIZE_X86_PC_REL,
+                                 rg.globs.ZEROIZE_X86_PC_REL,
                                  dict(aligned=1, step=block_size, shortBlocks=short_blocks),
                                  self.get_entropy_ranges(block_size, entropy_threshold=entropy_threshold))
         block_gen = self.genAlignedBlocks(block_size, short_blocks=short_blocks)
@@ -403,7 +403,7 @@ class HashedFile:
         block_gen = self.genRollingBlocks(block_size, step=step, short_blocks=short_blocks, limit_range=limit_range)
         output = hl.createFile(self,
                                block_size,
-                               reveal_globals.ZEROIZE_X86_PC_REL,
+                               rg.globs.ZEROIZE_X86_PC_REL,
                                dict(aligned=0, step=1, shortBlocks=short_blocks),
                                self.get_entropy_ranges(block_size, entropy_threshold))
 
