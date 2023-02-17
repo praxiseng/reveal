@@ -1,12 +1,12 @@
 BINARIES=bins/linux_bin
-SEARCH_FILE=bins/linux_bin/ls
+SEARCH_FILE=bins/linux_bin/apt
 
 DB=databases/default_database.db
 
 PYTHON=python3
 ENTRY=$(PYTHON) src/hasher.py
 
-HASH_FLAGS=--parallelism=16
+HASH_FLAGS=--zeroize --parallelism=1
 
 SOURCES = $(wildcard $(SOURCEDIR)/*.py)
 

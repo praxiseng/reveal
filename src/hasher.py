@@ -1,5 +1,6 @@
-from match import *
-from database import *
+
+import match
+import database
 import reveal_globals as rg
 
 
@@ -25,19 +26,19 @@ def main():
 
     rg.globs.ZEROIZE_X86_PC_REL = args.zeroize
 
-    db = FileDB(args.db, args.blocksize)
+    db = database.FileDB(args.db, args.blocksize)
 
     if args.ingest:
         db.ingest(args.ingest, parallelism=args.parallelism)
 
     if args.search:
-        et = ELFThunks(args.search)
+        et = database.ELFThunks(args.search)
 
         hash_list_file = db.rollingSearch(args.search, step=args.step, entropy_threshold=-1, limit_range=args.range)
         search_results = list(db.gen_matches_from_hash_list(hash_list_file))
         search_results = sorted(search_results, key=lambda a: a[0][1])
-        search_results = list(merge_runs(search_results))
-        counts = countMatches2(search_results, True)
+        search_results = list(match.merge_runs(search_results))
+        counts = match.countMatches2(search_results, True)
 
         #per_file_amount_matched(search_results, db)
 
@@ -50,7 +51,7 @@ def main():
             last_mc = mc
 
         if True:
-            sg = SpikeGrouper(args.blocksize)
+            sg = match.SpikeGrouper(args.blocksize)
             spikes = list(sg.group_spikes(counts))
 
 
