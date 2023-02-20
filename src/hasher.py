@@ -21,10 +21,12 @@ def main():
                         help='Zero out immediate operands that look like x86_64 PC relative addresses')
 
     parser.add_argument('--range', nargs=2, type=hex_int, default=None, help='Range for rolling search')
+    parser.add_argument('--entropy-threshold', metavar='T', type=float, default=0.2, help='Threshold for Shannon entropy normalized on a scale from 0 to 1.')
 
     args = parser.parse_args()
 
     rg.globs.ZEROIZE_X86_PC_REL = args.zeroize
+
 
     db = database.FileDB(args.db, args.blocksize)
 
@@ -34,19 +36,22 @@ def main():
     if args.search:
         et = database.ELFThunks(args.search)
 
-        hash_list_file = db.rollingSearch(args.search, step=args.step, entropy_threshold=-1, limit_range=args.range)
+        hash_list_file = db.rollingSearch(args.search, 
+                                          step=args.step, 
+                                          entropy_threshold=args.entropy_threshold, 
+                                          limit_range=args.range)
         search_results = list(db.gen_matches_from_hash_list(hash_list_file))
         search_results = sorted(search_results, key=lambda a: a[0][1])
         search_results = list(match.merge_runs(search_results))
         counts = match.countMatches2(search_results, True)
 
-        #per_file_amount_matched(search_results, db)
 
         print("Match Counts")
         last_present = set()
 
         last_mc = None
         for mc in counts:
+            mc: match.MatchCount
             mc.display_comparison(last_mc, db, et)
             last_mc = mc
 

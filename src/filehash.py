@@ -388,7 +388,7 @@ class HashedFile:
                 yield sector
             else:
                 self.sectors_entropy_lo += 1
-        #print(f'Entropy: {self.sectors_entropy_lo} low, {self.sectors_entropy_hi} high')
+        print(f'Entropy: {self.sectors_entropy_lo} low, {self.sectors_entropy_hi} high')
 
     def rollingHashToFile(self,
                           block_size,
@@ -397,7 +397,7 @@ class HashedFile:
                           short_blocks=False,
                           uniq=True,
                           entropy_threshold=0.2,
-                          limit_range=None):
+                          limit_range=None) -> HashListFile:
         hl = HashListFile(out_file_path)
 
         block_gen = self.genRollingBlocks(block_size, step=step, short_blocks=short_blocks, limit_range=limit_range)

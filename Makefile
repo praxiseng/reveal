@@ -1,5 +1,5 @@
-BINARIES=bins/linux_bin
-SEARCH_FILE=bins/linux_bin/apt
+BINARIES=bins/linux_bin/
+SEARCH_FILE=bins/linux_bin/ls
 
 DB=databases/default_database.db
 

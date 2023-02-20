@@ -1,3 +1,4 @@
+from math import floor, log10
 from hashlist import *
 from collections import defaultdict
 from enum import Enum
@@ -28,6 +29,8 @@ def match_end(a1, a2, l1):
     #print(f'match_end {a1}, {a2}, {l1}')
     return fid1==fid2 and off2 == off1+l1
 
+def round_sig(x, sig=2):
+    return round(x, sig-int(floor(log10(abs(x))))-1)
 
 class MatchRun:
     def __init__(self, a, b, l):
@@ -35,29 +38,45 @@ class MatchRun:
         self.b = b
         self.l = l
 
-        self.offset = a[1][0][1]
+        self.hd_a = HashData(a)
+        self.hd_b = HashData(b)
+
+        #self.offset = a[1][0][1]
+        self.offset = self.hd_a.getFirstOffset()
         self.end = self.offset + self.l
 
         self.merged = False
 
-        self.fds = None
-        if HashDes.MATCH_LIST == hdType(b):
-            self.fds = set(fid for fid, offset in b[1])
+        #self.fds = None
+        #if HashDes.MATCH_LIST == hdType(b):
+        #    self.fds = set(fid for fid, offset in b[1])
 
-        #print(f'mr {self.offset:x}-{self.end:x} {self.l:x}')
 
-    def can_merge(self, other):
+    def can_merge(self, other: 'MatchRun'):
+        #if round_sig(self.hd_b.file_count, 1) != round_sig(other.hd_b.file_count, 1):
+        #    return False
+        if self.hd_b.file_count != other.hd_b.file_count:
+            return False
+        if self.hd_b.fids and self.hd_b.fids != other.hd_b.fids:
+            return False
+
+
+        '''
         if other.offset != self.end:
             return False
         if not all(HashDes.MATCH_LIST == hdType(x) for x in [self.b, other.b]):
             return False
         if self.fds != other.fds:
             return False
+        '''
         return True
 
-    def merge(self, other):
+    def merge(self, other: 'MatchRun'):
+        assert(other.end > self.end)
+        assert(self.end >= other.offset)
         self.end = other.end
-        self.l += other.l
+        #self.l += other.l
+        self.l = self.end - self.offset
         other.merged = True
 
 
@@ -77,6 +96,7 @@ def merge_runs(search_results):
         if mr.merged:
             continue
         while True:
+            mr: MatchRun
             other = result_offsets.get(mr.end, None)
             if not other:
                 break
