@@ -50,12 +50,17 @@ def main():
         last_present = set()
 
         last_mc = None
-        for mc in counts:
-            mc: match.MatchCount
-            mc.display_comparison(last_mc, db, et)
-            last_mc = mc
 
-        if True:
+        show_comparison = True
+        show_summary = True
+
+        if show_comparison:
+            for mc in counts:
+                mc: match.MatchCount
+                mc.display_comparison(last_mc, db, et)
+                last_mc = mc
+
+        if show_summary:
             sg = match.SpikeGrouper(args.blocksize)
             spikes = list(sg.group_spikes(counts))
 

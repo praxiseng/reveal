@@ -3,4 +3,4 @@
 *.txt
 .idea
 __pycache__
-sample_binaries
+bins

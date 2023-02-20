@@ -2,6 +2,7 @@
 import queue
 from filehash import *
 from exefile import *
+from util import color
 from collections import defaultdict
 import reveal_globals as rg
 
@@ -82,19 +83,21 @@ class FileDB:
             return default
         return os.path.basename(path)
 
+    def file_hashes_name(self, hashedFile):
+        #return os.path.join(self.db_name, f'{btoh(hashedFile.getWholeFileHash())}_{hashedFile.id}')
+        return os.path.join(self.db_name, f'{btoh(hashedFile.getWholeFileHash())}.hashes')
+    
+    def get_hashes_file_out_path(self, input_path):
+        file_hash = get_whole_file_hash(input_path)
+        return os.path.join(self.db_name, f'{btoh(file_hash)}.hashes')
 
-    def _mk_hashed_file(self, path):
-        hf = HashedFile(path, 1)
-        #self.next_file_id += 1
-        return hf
 
-    def _tmpname(self, hashedFile):
-        return os.path.join(self.db_name, f'{btoh(hashedFile.getWholeFileHash())}_{hashedFile.id}')
-
-    def _hash_file(self, path):
+    def _hash_file(self, in_path, out_path):
         #print(f'Ingesting {path}')
-        hf = self._mk_hashed_file(path)
-        hashlist = hf.hashBlocksToFile(self.blocksize, self._tmpname(hf), self.short_blocks)
+        hf = HashedFile(in_path)
+        hashlist = hf.hashBlocksToFile(self.blocksize,
+                                       out_path,  #self.file_hashes_name(hf), 
+                                       self.short_blocks)
         return hashlist
 
 
@@ -112,43 +115,42 @@ class FileDB:
             if os.path.isdir(path):
                 for root, dirs, files in os.walk(path):
                     for file in files:
-                        file_path = os.path.join(root, file)
-                        file_paths.append(file_path)
+                        yield os.path.join(root, file)
             else:
-                file_paths.append(path)
-        return file_paths
+                yield path
 
 
-    def hash_file(self, args) -> HashListFile:
-        index, path = args
-        status.update('Ingest', ingest_file_index=index, filepath=path, filename=os.path.basename(path))
-        hashlist = self._hash_file(path)
+    def hash_file(self, index, in_path, out_path) -> HashListFile:
+        status.update('Ingest', ingest_file_index=index, filepath=in_path, filename=os.path.basename(in_path))
+        hashlist = self._hash_file(in_path, out_path)
         return hashlist.path
     
 
-    def hash_files_serial(self, paths):
-
-        hash_files = []
-        for i, path in enumerate(paths):
-            hashlist_path = self.hash_file((i+1, path))
-            hash_file = HashListFile(hashlist_path)
-            hash_files.append(hash_file)
-        return hash_files
+    def hash_files_serial(self, inout_paths):
+        inout_paths_copy = []
+        for i, inout_path in enumerate(inout_paths):
+            in_path, out_path = inout_path
+            hashlist_path = self.hash_file(i+1, in_path, out_path)
+            assert(hashlist_path == out_path)
+            inout_paths_copy.append(inout_path)
+        return inout_paths_copy
 
 
     def hash_files_parallel_callback(self, in_files, out_files, files_processed):
         while True:
-            path = in_files.get()
-
-            if path is None:
+            inout_path = in_files.get()
+            if inout_path is None:
                 break
+
+            in_path, out_path = inout_path
+
             files_processed.value += 1
-            out_path = self.hash_file((files_processed.value, path))
+            out_path = self.hash_file(files_processed.value, in_path, out_path)
             out_files.put(out_path)
         out_files.put(None)
 
 
-    def hash_files_parallel(self, paths, parallelism = 10):
+    def hash_files_parallel(self, inout_paths, parallelism = 10):
         # Make linux use spawn method to behave like Windows, so we are less likely to introduce platform-specific bugs.
         #mp.set_start_method('spawn')
 
@@ -164,68 +166,100 @@ class FileDB:
             procs.append(p)
             p.start()
 
-        for path in paths:
-            inQ.put(path)
+        files_to_ingest = 0
+        inout_path_list = []
+        for inout_path in inout_paths:
+            files_to_ingest += 1
+            inQ.put(inout_path)
+            inout_path_list.append(inout_path)
+        status.update('Ingest', files_to_ingest=files_to_ingest)
 
         for p in procs:
             inQ.put(None)
 
-        out_files = []
         n_nulls = 0
         # Need to drain the queue before join because on Windows the subprocesses will hang if
         # they have items waiting on the queue.
         while n_nulls < len(procs):
-            path = outQ.get()
-            if path is None:
+            if outQ.get() is None:
                 n_nulls += 1
-            else:
-                out_files.append(path)
 
         for p in procs:
             p.join()
 
-        hash_files = [HashListFile(path) for path in out_files]
-        return hash_files
+        return inout_path_list
 
-
-    def ingest(self, paths, force_existing=False, parallelism=1):
-        paths = self.expand_paths(paths, force_existing)
-
+    def _ingest_process(self, inout_paths, parallelism):
         status.start_process('Ingest',
-                             'Ingest {ingest_file_index:4} of {files_to_ingest:<4} {sum_uniq_hashes:7}/{sum_hashes:<7} hashes',
-                             ingest_file_index=0,
-                             files_to_ingest=len(paths),
-                             filepath = '',
-                             filename = '',
-                             sum_hashes = 0,
-                             sum_uniq_hashes = 0)
+            'Ingest {ingest_file_index:4} of {files_to_ingest:<4} {sum_uniq_hashes:7}/{sum_hashes:<7} hashes',
+            ingest_file_index=0,
+            files_to_ingest=0,
+            filepath = '',
+            filename = '',
+            sum_hashes = 0,
+            sum_uniq_hashes = 0)
 
         if parallelism <= 1:
-            hash_files = self.hash_files_serial(paths)
+            inout_paths = self.hash_files_serial(inout_paths)
         else:
-            hash_files = self.hash_files_parallel(paths, parallelism)
+            inout_paths = self.hash_files_parallel(inout_paths, parallelism)
 
         status.finish_process('Ingest')
+        return inout_paths
 
+    def _merge(self, inout_paths):
+        # TODO: handle really large ingest lists by doing a hierarchical merge.
+        merge_files = [HashListFile(outpath) for inpath, outpath in inout_paths]
+
+        # TODO: don't ingest existing files by MD5 if they are already in the database
+        hashes_path = self.get_hashes_path()
+        if os.path.exists(hashes_path):
+            merge_files.append(HashListFile(hashes_path))
+    
         merge_path = self.get_merge_path()
         if os.path.exists(merge_path):
             os.remove(merge_path)
-
         merged = HashListFile(merge_path)
-
-        merge_files = hash_files[:]
-        if os.path.exists(self.get_hashes_path()):
-            merge_files.append(self.open_db())
-
         merged.createMerge(merge_files)
 
-        if os.path.exists(merge_path):
-            os.replace(merge_path, self.get_hashes_path())
-            self.enum_file_list()
-        else:
+        if not os.path.exists(merge_path):
             print(f"Error - no merge created at {merge_path}")
+            return
+        
+        os.replace(merge_path, self.get_hashes_path())
+        self.enum_file_list()
 
-        return hash_files
+    def singleton_output(self, inout_paths):
+        ''' Output files are named by hash of the input file contents.  Since multiple input files (at different paths)
+            may have the same hash, parallel processing could concurrently write to the same output and produce a corrupt
+             file.  This function deduplicates outputs, only taking the first file with that hash.
+            
+        '''
+        by_hashes = defaultdict(list)
+        for inpath, outpath in inout_paths:
+            if outpath not in by_hashes:
+                yield (inpath, outpath)
+            by_hashes[outpath].append(inpath)
+
+        for outpath, inpaths in by_hashes.items():
+            if len(inpaths) > 1:
+                print(f'{color.lineclear}Deduplicating output to {outpath}')
+                for i, inpath in enumerate(inpaths):
+                    print(f'    Input {i}: {inpath}')
+
+
+    def ingest(self, paths, force_existing=False, parallelism=1):
+
+        paths = self.expand_paths(paths, force_existing)
+
+        # Keep inout_paths as a generator so we don't have to read and compute whole-file hashes (needed for output file name) before we
+        # start seeing progress.  This means that each stage should re-emit the items in the list.  
+        # In parallel mode, this means the main process can asynchrounusly compute the whole-file hash before pushing into the queue.
+        inout_paths = ((inpath, self.get_hashes_file_out_path(inpath)) for inpath in paths)
+        inout_paths = self.singleton_output(inout_paths)
+        inout_paths = self._ingest_process(inout_paths, parallelism)
+        self._merge(inout_paths)
+
 
     def rollingSearch(self, file_to_hash, step=1, entropy_threshold=0.2, limit_range=None):
         fid = 0  # We don't need a valid fid

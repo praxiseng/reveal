@@ -176,10 +176,17 @@ def sorter(target, key=None):
             target.send(item)
 
 
-def md5(b):
+def md5(b, n_bytes=6):
     m = hashlib.md5()
     m.update(b)
-    return m.digest()[:6]
+    return m.digest()[:n_bytes]
+
+def file_hash(b):
+    return md5(b, 16)
+
+def get_whole_file_hash(path):
+    with open(path, 'rb') as fd:
+        return file_hash(fd.read())
 
 
 

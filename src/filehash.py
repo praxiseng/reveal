@@ -149,7 +149,7 @@ class FileCursor:
 
 
 class HashedFile:
-    def __init__(self, path, id):
+    def __init__(self, path, id = -1):
         full_path = path
         try:
             full_path = os.path.realpath(path)
@@ -183,12 +183,13 @@ class HashedFile:
 
     def getWholeFileHash(self):
         if not self.whole_file_hash:
-            with self.openFile() as fd:
-                self.whole_file_hash = md5(fd.read())
+            self.whole_file_hash = get_whole_file_hash(self.path)
         return self.whole_file_hash
 
     def getData(self):
-        return dict(path=self.path, id=self.id, md5=self.getWholeFileHash())
+        return dict(path=self.path, 
+                    id=self.id, 
+                    md5=self.getWholeFileHash())
 
     def entropyValues(self, bs):
         with self.openFile() as fd:
@@ -202,7 +203,6 @@ class HashedFile:
                 yield (offset, e)
 
                 offset += bs
-
 
     def displayEntropyMap(self, bs, COL=128):
         entropies = self.entropyValues(bs)
@@ -341,7 +341,6 @@ class HashedFile:
                 if hi and offset >= hi:
                     break
 
-
     def hashBlocksToFile(self, block_size, out_file_path, short_blocks=False, uniq=True, entropy_threshold=0.2) -> HashListFile:
         hl = HashListFile(out_file_path)
         out_file = hl.createFile(self,
@@ -423,4 +422,4 @@ class HashedFile:
 
     @staticmethod
     def fromData(self, file_data):
-        return HashedFile(file_data['path'], file_data['id'])
+        return HashedFile(file_data['path'])

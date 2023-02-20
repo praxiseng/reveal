@@ -4,9 +4,9 @@ SEARCH_FILE=bins/linux_bin/ls
 DB=databases/default_database.db
 
 PYTHON=python3
-ENTRY=$(PYTHON) src/hasher.py
+ENTRY=$(PYTHON) src/main.py
 
-HASH_FLAGS=--zeroize --parallelism=1
+HASH_FLAGS=--zeroize --parallelism=10
 
 SOURCES = $(wildcard $(SOURCEDIR)/*.py)
 
