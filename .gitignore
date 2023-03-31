@@ -2,5 +2,10 @@
 *.db
 *.txt
 .idea
+*.obj
+hasher
+CMakeFiles
+build
+.vscode
 __pycache__
 bins
