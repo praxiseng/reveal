@@ -13,6 +13,8 @@
 #include <fstream>
 #include "json.hpp"
 
+#include "docopt/docopt.h"
+
 
 using json = nlohmann::json;
 using cbor_tag_handler_t = nlohmann::detail::cbor_tag_handler_t;
@@ -341,24 +343,49 @@ public:
 };
 
 
+static const char USAGE[] =
+R"(Hasher
+
+    Usage:
+      hasher hash INFILE OUTFILE [options]
+
+    Options:
+      INFILE          File to hash
+      OUTFILE         Output file name
+      -h --help       Show this screen.
+      --bs=BLOCKSIZE  Hash blocks of the specified size [default: 128]
+)";
+
 int main(int argc, char** argv) 
 {
-    if(argc < 2) {
+    std::map<std::string, docopt::value> args
+        = docopt::docopt(USAGE,
+                         { argv + 1, argv + argc },
+                         true,               // show help if requested
+                         "Hasher 0.1");  // version string
+
+    if(argc < 3) {
         printf("Missing argument.\n");
         return -1;
     }
 
-    FileWithRawBytes file = FileWithRawBytes(argv[1]);
+    std::string infile = args["INFILE"].asString();
+    std::string outfile = args["OUTFILE"].asString();
 
-    file.make_hashes_file("test.cbor", 128);
+    docopt::value bs_value = args["--bs"];
+    size_t bs = bs_value.kind()==docopt::Kind::Empty ? 128 : bs_value.asLong();
+ 
+    FileWithRawBytes file = FileWithRawBytes(infile.c_str());
 
-
+    file.make_hashes_file(outfile.c_str(), bs);
     
-    FILE* fd = fopen("test.cbor", "rb");
+    /*
+    FILE* fd = fopen(outfile, "rb");
     json header = json::from_cbor(fd, false);
     std::cout << header.dump(4);
     for(int i=0; i<10; i++) {
         json next_line = json::from_cbor(fd, false);
         std::cout << next_line.dump(4);
     }
+    */
 }

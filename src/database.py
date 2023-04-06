@@ -1,5 +1,7 @@
 #from hashlist import *
 import queue
+import subprocess
+
 from filehash import *
 from exefile import *
 from util import color
@@ -9,7 +11,7 @@ import reveal_globals as rg
 import multiprocessing as mp
 
 class FileDB:
-    def __init__(self, db_name, blocksize, short_blocks=False):
+    def __init__(self, db_name, blocksize, short_blocks=False, use_c_tool=False):
         self.db_name = db_name
         #self.next_file_id = 1
 
@@ -21,6 +23,9 @@ class FileDB:
         self.enum_file_list()
 
         self.file_offset_thunks = []
+
+        self.use_c_tool = use_c_tool
+        print(f"Use C tool? {use_c_tool}")
 
         # self.db_file = SimpleSectorHashList(self.get_hashes_path())
 
@@ -92,12 +97,19 @@ class FileDB:
         return os.path.join(self.db_name, f'{btoh(file_hash)}.hashes')
 
 
-    def _hash_file(self, in_path, out_path):
+    def _hash_file(self, in_path, out_path) -> HashListFile:
         #print(f'Ingesting {path}')
         hf = HashedFile(in_path)
-        hashlist = hf.hashBlocksToFile(self.blocksize,
-                                       out_path,  #self.file_hashes_name(hf), 
-                                       self.short_blocks)
+        if self.use_c_tool:
+            subcommand = ['hasher', 'hash', in_path, out_path, '--bs', str(self.blocksize)]
+            # print(f'Running command: {subcommand}')
+            p = subprocess.Popen(subcommand)
+            p.wait()
+            hashlist = HashListFile(out_path)
+        else:
+            hashlist = hf.hashBlocksToFile(self.blocksize,
+                                           out_path,  #self.file_hashes_name(hf),
+                                           self.short_blocks)
         return hashlist
 
 

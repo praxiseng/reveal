@@ -23,7 +23,7 @@
 })
 
 
-#define SECTOR_HASH_BYTES 16
+#define SECTOR_HASH_BYTES 6
 #define FILE_HASH_BYTES 16
 
 std::vector<uint8_t> read_file_contents(const char* path);

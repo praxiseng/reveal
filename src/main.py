@@ -20,6 +20,9 @@ def main():
     parser.add_argument('--zeroize', action='store_true',
                         help='Zero out immediate operands that look like x86_64 PC relative addresses')
 
+
+    parser.add_argument('--use-c-tool', action='store_true', help="Use the hasher tool installed on the system")
+
     parser.add_argument('--range', nargs=2, type=hex_int, default=None, help='Range for rolling search')
     parser.add_argument('--entropy-threshold', metavar='T', type=float, default=0.2, help='Threshold for Shannon entropy normalized on a scale from 0 to 1.')
 
@@ -28,7 +31,7 @@ def main():
     rg.globs.ZEROIZE_X86_PC_REL = args.zeroize
 
 
-    db = database.FileDB(args.db, args.blocksize)
+    db = database.FileDB(args.db, args.blocksize, use_c_tool=args.use_c_tool)
 
     if args.ingest:
         db.ingest(args.ingest, parallelism=args.parallelism)
