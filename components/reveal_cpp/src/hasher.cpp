@@ -405,6 +405,11 @@ struct cbor_generator {
     FILE* fd;
     cbor_generator(std::string path) {
         fd = fopen(path.c_str(), "rb");
+        if(!fd) {
+            printf("Error opening up file %s.  Check if file is present and ulimits are high enough.", path.c_str());
+            exit(1);
+        }
+        assert(fd);
     }
 
     json
