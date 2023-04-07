@@ -5,6 +5,7 @@
 #include <vector>
 #include <tuple>
 #include <set>
+#include <queue>
 //#include <functional>
 //#include <algorithm>
 #include "md5.h"
@@ -125,7 +126,8 @@ enum HashMapKey_e {
 };
 
 
-using fid_offset_pair = std::tuple<size_t, size_t>;
+using fid_offset_pair = typename std::tuple<size_t, size_t>;
+
 
 /*
  * A hash descriptor is a record describing information about a hash.
@@ -142,13 +144,61 @@ struct HashDescription {
                     std::vector<Sector>::iterator end) :
         hash(_hash)
     {
-        // Take in a list of sectors from the same file with the same hash
+        // This constructor is called when creating a HashDescription on a single file.
+        // It takes in an iterator range of sectors with the same hash.
 
         file_count = 1;
         for(; begin != end; begin++) {
             hash_count++;
             file_offsets.emplace_back(0, begin->offset);
         }
+    }
+
+    HashDescription(json hash_des) {
+        switch(hash_descriptor_type(hash_des)) {
+            case HDT_MATCH_LIST:
+                hash = sector_hash_t{hash_des[0].get_binary()};
+
+                file_offsets = hash_des[1];
+                hash_count = file_offsets.size();
+                for(auto [fid, offset] : file_offsets) {
+                    file_ids.insert(fid);
+                }
+                file_count = file_ids.size();
+
+                /*
+                std::cout << "Hash: " << hash << " ";
+                for(auto [fid, off] : file_offsets) {
+                    std::cout << " " << off;
+                }
+                std::cout << std::endl;
+                */
+                break;
+
+        }
+    }
+
+    void merge(HashDescription& other) {
+        file_count += other.file_count;
+        hash_count += other.hash_count;
+        file_offsets.insert(file_offsets.end(), other.file_offsets.begin(), other.file_offsets.end());
+        file_ids.insert(other.file_ids.begin(), other.file_ids.end());
+    }
+
+    void thunk_fids(std::function<size_t (size_t)> thunker) {
+        std::vector<fid_offset_pair> new_offsets;
+        std::set<size_t> new_ids;
+        for(auto [fid, offset] : file_offsets) {
+            size_t output_fid = thunker(fid);
+            new_ids.insert(output_fid);
+            new_offsets.emplace_back(output_fid, offset);
+        }
+        file_offsets = new_offsets;
+
+        for(auto fid : file_ids) {
+            new_ids.insert(fid);
+        }
+        file_ids = new_ids;
     }
 
     json asList() {
@@ -173,6 +223,15 @@ struct HashDescription {
             return asList();
         else
             return asSummary();
+    }
+
+
+    void display(const char* prefix) {
+        std::cout << prefix << hash << " " << file_count << " " << hash_count;
+        for(auto [fid, off] : file_offsets) {
+            std::cout << " (" << fid << "," << off << ")";
+        }
+        std::cout << std::endl;
     }
 };
 
@@ -308,8 +367,8 @@ public:
     void make_hashes_file(const char* out_path, size_t bs) {
         std::ofstream outfile(out_path, std::ios::out | std::ios::binary);
 
-        auto calculated_entropy_ranges = entropy_ranges(64, 0.2);
-        calculated_entropy_ranges = coarsen_entropy_ranges(calculated_entropy_ranges, 128);
+        //auto calculated_entropy_ranges = entropy_ranges(64, 0.2);
+        //calculated_entropy_ranges = coarsen_entropy_ranges(calculated_entropy_ranges, 128);
 
         json header = {
             {"files", {
@@ -327,7 +386,7 @@ public:
                 {"shortBlocks", false},
                 {"foo", "bar"}
             }},
-            {"entropy_ranges", calculated_entropy_ranges}
+            //{"entropy_ranges", calculated_entropy_ranges}
         };
 
         append_cbor(outfile, header);
@@ -342,12 +401,229 @@ public:
 
 };
 
+struct cbor_generator {
+    FILE* fd;
+    cbor_generator(std::string path) {
+        fd = fopen(path.c_str(), "rb");
+    }
+
+    json
+    operator()() {
+        try {
+            return json::from_cbor(fd, false);
+        } catch(...) {
+            // The feof(fd) call won't catch EOF when we haven't failed to load the next
+            // character yet, so we handle EOF by catching the exception thrown.
+            json empty;
+            return empty;
+        }
+    }
+
+};
+
+
+class HashesFile {
+public:
+    std::string path;
+    json header;
+
+    HashesFile(std::string _path) {
+        path = _path;
+
+        cbor_generator cb(path);
+
+        header = cb();
+    }
+
+    cbor_generator
+    iterate_hashes() {
+        cbor_generator cb(path);
+
+        cb(); // skip header
+
+        return cb;
+    }
+};
+
+
+class MergeQItem {
+    size_t generator_index;
+    HashDescription hash_des;
+
+
+};
+
+
+struct merge_q_item {
+    size_t gen_index;
+    HashDescription hd;
+
+    merge_q_item(size_t generator_index, json & data):
+        gen_index(generator_index), hd(data) {
+    }
+};
+
+struct merge_comparator {
+    bool operator()(struct merge_q_item* a, struct merge_q_item* b) {
+            return a->hd.hash > b->hd.hash;
+        }
+};
+
+
+struct FidThunker {
+    std::map<std::tuple<size_t, size_t>, size_t> thunks;
+    size_t current_fid = 1;
+    FidThunker(std::vector<HashesFile> & files) {
+        for(size_t index=0; index<files.size(); index++) {
+            HashesFile & hf = files[index];
+            for(auto file_data : hf.header["files"]) {
+                //std::cout << "File: " << file_data.dump() << std::endl;
+                
+                size_t input_fid = file_data["id"];
+                thunks[std::make_tuple(index, input_fid)] = current_fid++;
+            }
+        }
+    }
+
+    size_t thunk(size_t index, size_t input_fid) {
+        return thunks[std::make_tuple(index,input_fid)];
+    }
+
+    std::function<size_t (size_t)>
+    get_lambda_thunker(size_t index) {
+        return [=](size_t input_fid) {
+            return this->thunk(index, input_fid);
+        };
+    }
+
+    json get_header(std::vector<HashesFile> & hashes_files) {
+        std::vector<json> files;
+        for(size_t i=0; i<hashes_files.size(); i++) {
+            auto &mf = hashes_files[i];
+            //std::cout << mf.header.dump() << std::endl;
+            for(json file : mf.header["files"]) {
+                file["id"] = thunk(i, file["id"]);
+                files.push_back(file);
+            }
+        }
+
+        auto header1 = hashes_files[0].header;
+
+        json header = {
+            {"files", files},
+            {"blocksize", header1["blocksize"]},
+            {"zeroize_x86_pc_rel", header1["zeroize_x86_pc_rel"]},
+            {"blockAlgorithm", header1["blockAlgorithm"]}
+        };
+
+        return header;
+    }
+};
+
+
+struct merge_output {
+    merge_q_item *hash_run_start = NULL;
+    
+    FidThunker thunker;
+    std::vector<std::function<size_t (size_t)>> thunkers;
+
+    std::ofstream outfile;
+
+    merge_output(std::vector<HashesFile> & merge_files,
+                 const char* out_file) : 
+        thunker(merge_files),
+        outfile(out_file, std::ios::out | std::ios::binary)
+    {
+        for(size_t i=0; i<merge_files.size(); i++) {
+            thunkers.push_back(thunker.get_lambda_thunker(i));
+        }
+            
+        json header = thunker.get_header(merge_files);
+        //std::cout << "Header= " << header.dump(4) << std::endl;
+        append_cbor(outfile, header);
+    }
+
+    void operator()(size_t input_index, merge_q_item* item) {
+        bool in_run = false;
+        if(item) {
+            HashDescription &hd = item->hd;
+
+            hd.thunk_fids(thunkers[input_index]);
+
+            in_run = hash_run_start && hash_run_start->hd.hash == hd.hash;
+            if(in_run) {
+                hash_run_start->hd.merge(hd);
+            }
+        }
+        if(!in_run) {
+            if(hash_run_start) {
+                //hash_run_start->hd.display("Merged: ");
+                
+                json hash_descriptor_doc = hash_run_start->hd.asListOrSummary();
+                append_cbor(outfile, hash_descriptor_doc);
+            }
+            hash_run_start = item;
+        }
+
+        //item->hd.display("Popped: ");
+    }
+};
+
+void merge(std::map<std::string, docopt::value> args,
+           const char* out_file) {
+    std::vector<HashesFile> merge_files;
+    for(auto str: args["MERGEFILE"].asStringList()) {
+        merge_files.emplace_back(str);
+    }
+
+    merge_output output(merge_files, out_file);
+
+    std::vector<cbor_generator> generators;
+    for(auto & merge_file : merge_files) {
+        generators.push_back(merge_file.iterate_hashes());
+    }
+
+    std::priority_queue<merge_q_item*, std::vector<merge_q_item*>, merge_comparator> pq;
+
+    for(size_t i=0; i<generators.size(); i++) {
+        json res = generators[i]();
+        if(!res.is_null()) {
+            merge_q_item* item = new merge_q_item(i, res);
+            pq.push(item);
+        }
+    }
+
+    while(!pq.empty()) {
+        merge_q_item* item = pq.top();
+        pq.pop();
+
+        size_t gen_index = item->gen_index;
+        //std::cout << "Popped " << item->hd.hash << std::endl;
+
+        //item->hd.thunk_fids(thunkers[gen_index]);
+        output(gen_index, item);
+
+        //delete item;
+
+        json res = generators[gen_index]();
+        if(!res.is_null()) {
+            merge_q_item* new_item = new merge_q_item(gen_index, res);
+            pq.push(new_item);
+        }
+    }
+    output(0, NULL);
+
+}
+
+
+
 
 static const char USAGE[] =
 R"(Hasher
 
     Usage:
       hasher hash INFILE OUTFILE [options]
+      hasher merge OUTFILE [MERGEFILE...]
 
     Options:
       INFILE          File to hash
@@ -355,30 +631,32 @@ R"(Hasher
       -h --help       Show this screen.
       --bs=BLOCKSIZE  Hash blocks of the specified size [default: 128]
 )";
-
 int main(int argc, char** argv) 
 {
     std::map<std::string, docopt::value> args
         = docopt::docopt(USAGE,
                          { argv + 1, argv + argc },
-                         true,               // show help if requested
+                         true,           // show help if requested
                          "Hasher 0.1");  // version string
 
-    if(argc < 3) {
-        printf("Missing argument.\n");
-        return -1;
+    if(args["hash"].asBool()) {
+        std::string infile = args["INFILE"].asString();
+        std::string outfile = args["OUTFILE"].asString();
+        docopt::value bs_value = args["--bs"];
+        size_t bs = bs_value.kind()==docopt::Kind::Empty ? 128 : bs_value.asLong();
+    
+        FileWithRawBytes file = FileWithRawBytes(infile.c_str());
+
+        file.make_hashes_file(outfile.c_str(), bs);
+    }
+    
+    if(args["merge"].asBool()) {
+        printf("Merging!\n");
+
+        merge(args, args["OUTFILE"].asString().c_str());
     }
 
-    std::string infile = args["INFILE"].asString();
-    std::string outfile = args["OUTFILE"].asString();
 
-    docopt::value bs_value = args["--bs"];
-    size_t bs = bs_value.kind()==docopt::Kind::Empty ? 128 : bs_value.asLong();
- 
-    FileWithRawBytes file = FileWithRawBytes(infile.c_str());
-
-    file.make_hashes_file(outfile.c_str(), bs);
-    
     /*
     FILE* fd = fopen(outfile, "rb");
     json header = json::from_cbor(fd, false);

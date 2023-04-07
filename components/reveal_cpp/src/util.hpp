@@ -2,10 +2,13 @@
 #define __UTIL_H__
 
 
+#include <iostream>
+#include <iomanip>
 #include <cstdint>
 #include <vector>
 #include <tuple>
 #include <string.h>
+#include <assert.h>
 #include "md5.h"
 
 #define maxval(a,b)             \
@@ -41,12 +44,24 @@ struct_to_byte_vector(T buf, size_t array_size=1) {
 typedef struct sector_hash {
     uint8_t hash[SECTOR_HASH_BYTES] = {0};
 
+    sector_hash() {}
+
+    sector_hash(std::vector<uint8_t> bytes) {
+        assert(bytes.size() == SECTOR_HASH_BYTES);
+        memcpy(hash, bytes.data(), SECTOR_HASH_BYTES);
+    }
+
     bool operator==(const sector_hash &other) {
         return 0==memcmp(this->hash, other.hash, sizeof(sector_hash));
     }
-
     bool operator!=(const sector_hash &other) {
         return 0!=memcmp(this->hash, other.hash, sizeof(sector_hash));
+    }
+    bool operator<(const sector_hash &other) {
+        return 0>memcmp(this->hash, other.hash, sizeof(sector_hash));
+    }
+    bool operator>(const sector_hash &other) {
+        return 0<memcmp(this->hash, other.hash, sizeof(sector_hash));
     }
 
     std::vector<uint8_t>
@@ -54,7 +69,16 @@ typedef struct sector_hash {
         auto vec = struct_to_byte_vector(*this);
         return vec;
     }
+
+    friend std::ostream & operator<<(std::ostream &cout, sector_hash &h) {
+        for(size_t i=0; i<SECTOR_HASH_BYTES; i++) {
+            cout << std::hex << std::setfill('0') << std::setw(2) << int{h.hash[i]};
+        }
+        return cout;
+    }
 } sector_hash_t;
+
+
 
 
 typedef struct {

@@ -6854,7 +6854,6 @@ class json_sax_dom_parser
     {
         errored = true;
         static_cast<void>(ex);
-        printf("Offset=%lx\n", offset);
         if (allow_exceptions)
         {
             JSON_THROW(ex);

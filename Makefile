@@ -7,7 +7,7 @@ PYTHON=python3
 ENTRY=$(PYTHON) src/main.py
 
 #HASH_FLAGS=--zeroize --parallelism=10
-HASH_FLAGS=--parallelism=10 --blocksize=128 --use-c-tool
+HASH_FLAGS=--parallelism=16 --blocksize=512 --use-c-tool
 
 SOURCES = $(wildcard $(SOURCEDIR)/*.py)
 
