@@ -5,14 +5,15 @@ import shutil
 import sys
 import time
 from collections import defaultdict
+from typing import Generator
 
 import docopt
 
 from filehash import Sector, HashedFile
 import cbor2
 
+N_BYTES_IN_HASH = 6
 
-N_BYTES_IN_HASH=6
 
 def rowgen2(con, query):
     res = con.execute(query)
@@ -24,10 +25,10 @@ def rowgen2(con, query):
         yield row
 
 
-
 def create_tables(db_connection, tables):
     for table in tables:
         db_connection.execute(table)
+
 
 def init_db(path, tables, delete_existing):
     if delete_existing and os.path.exists(path):
@@ -39,6 +40,7 @@ def init_db(path, tables, delete_existing):
     if not exists:
         create_tables(connection, tables)
     return connection
+
 
 def get_hash_id(hash_bytes):
     return int.from_bytes(hash_bytes[:N_BYTES_IN_HASH], 'big')
@@ -94,7 +96,18 @@ class SQLHashDB:
         self.db_connection.close()
         self.db_connection = None
 
-    def convert_nsrl_file_list(self, input_db):
+    def add_file(self, path, file_hash="") -> int:
+        name = os.path.basename(path)
+        cur = self.db_connection.cursor()
+        cur.execute("INSERT INTO FILES (name, path, file_hash) VALUES (?, ?, ?)",
+                    (name, path, file_hash))
+        row_id = cur.lastrowid
+        cur.close()
+        return row_id
+
+    def import_nsrl_file_list(self,
+                              input_db: sqlite3.Connection):
+
         insert_query = """INSERT INTO FILES
             (name, file_hash, metadata_id)
             VALUES (?, ?, ?)
@@ -105,19 +118,45 @@ class SQLHashDB:
         query = "SELECT DISTINCT key_hash, metadata_id, file_name, extension FROM MD5B128"
         for row in rowgen2(input_db, query):
             key_hash, metadata_id, file_name, extension = row
-            #print(f'Row {metadata_id:12} {file_name} {extension}')
+            # print(f'Row {metadata_id:12} {file_name} {extension}')
             file_records.append((f'{file_name}.{extension}', key_hash, metadata_id))
 
         self.db_connection.executemany(insert_query, file_records)
         self.db_connection.commit()
 
-    def convert_nsrl_hashfiles(self, input_db):
-        fid_lookup = {metadata_id : file_id
+    def add_hash_blocks(self,
+                        fid: int,
+                        sectors: Generator[Sector, None, None]):
+
+        new_records = []
+        n_records = 0
+
+        insert_query = """INSERT INTO HASHFILES
+            (hash_id, file_id, offset)
+            VALUES (?, ?, ?)"""
+
+        for sector in sectors:
+            hash_id = get_hash_id(sector.hash())
+            new_records.append((hash_id, fid, sector.offset))
+            if len(new_records) >= 1000000:
+                self.db_connection.executemany(insert_query, sorted(new_records))
+                self.db_connection.commit()
+                n_records += len(new_records)
+                print(f'Inserted {n_records} hash blocks')
+                new_records = []
+        if new_records:
+            self.db_connection.executemany(insert_query, sorted(new_records))
+            self.db_connection.commit()
+
+    def convert_nsrl_hashfiles(self,
+                               input_db: sqlite3.Connection):
+
+        fid_lookup = {metadata_id: file_id
                       for file_id, metadata_id in
                       rowgen2(self.db_connection, "SELECT file_id, metadata_id FROM FILES")}
 
         insert_query = """INSERT INTO HASHFILES
-            (hash_id, offset, file_id)
+            (hash_id, file_id, offset)
             VALUES (?, ?, ?)"""
         query = "SELECT * FROM MD5B128 ORDER BY HASH"
 
@@ -126,12 +165,12 @@ class SQLHashDB:
         for row in rowgen2(input_db, query):
             metadata_id, key_hash, block, hash, file_name, extension = row
 
-            #hash_id = int.from_bytes(bytes.fromhex(hash)[:N_BYTES_IN_HASH], 'big')
+            # hash_id = int.from_bytes(bytes.fromhex(hash)[:N_BYTES_IN_HASH], 'big')
             hash_id = get_hash_id(bytes.fromhex(hash))
             file_id = fid_lookup[metadata_id]
-            offset = block*128
-            #print(f'Hash ID {hash_id:10} {hash} {hash_id:{N_BYTES_IN_HASH}x}')
-            new_records.append((hash_id, offset, file_id))
+            offset = block * 128
+            # print(f'Hash ID {hash_id:10} {hash} {hash_id:{N_BYTES_IN_HASH}x}')
+            new_records.append((hash_id, file_id, offset))
 
             if len(new_records) >= 1000000:
                 # Pre-sorting a large number of records makes the insert much more efficient because it improves locality of access
@@ -148,6 +187,8 @@ class SQLHashDB:
             self.db_connection.commit()
 
     def populate_hashcount(self):
+        self.db_connection.execute("DELETE FROM HASHCOUNT")
+        self.db_connection.commit()
         self.db_connection.execute("""
             INSERT INTO HASHCOUNT
             SELECT hash_id, count(*) as hash_count, count(DISTINCT file_id) as file_count FROM HASHFILES GROUP BY hash_id
@@ -170,6 +211,10 @@ class SQLHashDB:
 
 
 class RollingSearchDB:
+    """
+    A RollingSearchDB is a temporary DB with all the rolling hashes from a file.
+    """
+
     tables = ['''
         CREATE TABLE "ROLLING_HASH" (
             hash_id integer not null,
@@ -189,11 +234,11 @@ class RollingSearchDB:
     def rolling_hash(self,
                      file_path,
                      bs,
-                     entropy_threshold = 0.2):
+                     entropy_threshold=0.2):
         hf = HashedFile(file_path)
         sectors = hf.genRollingBlocks(bs, step=1, short_blocks=False, limit_range=None)
 
-        #block_gen = self.filter_sector_entropy(block_gen, block_size, threshold=entropy_threshold)
+        # block_gen = self.filter_sector_entropy(block_gen, block_size, threshold=entropy_threshold)
 
         insert_query = """INSERT INTO ROLLING_HASH
             (hash_id, offset)
@@ -201,7 +246,6 @@ class RollingSearchDB:
 
         n_records = 0
         new_records = []
-
 
         sectors = hf.filter_sector_entropy(sectors, bs, threshold=entropy_threshold)
 
@@ -221,11 +265,10 @@ class RollingSearchDB:
             self.db_connection.commit()
 
 
-
 def import_nsrl_db(hash_db_path, nsrl_db_path, rebuild=False):
     if rebuild or not os.path.exists(hash_db_path):
         hash_db = SQLHashDB(hash_db_path, rebuild)
-        hash_db.convert_nsrl_to_sector_db(nsrl_db_path)
+        hash_db.import_nsrl_to_sector_db(nsrl_db_path)
         hash_db.close()
 
 
@@ -255,12 +298,20 @@ def search_db(args):
     count_deltas = defaultdict(int)
     id_set_add = defaultdict(set)
     id_set_sub = defaultdict(set)
+    id_set = defaultdict(lambda:defaultdict(int))
 
     for hash_id, file_count, hash_count, offset, file_names, file_ids in count_hashes:
+
+        #print(f'{offset:6x} {file_names}')
         count_deltas[offset] += file_count
         count_deltas[offset + block_size] -= file_count
 
         fids = set(int(fid) for fid in file_ids.split(','))
+
+        for fid in fids:
+            id_set[offset][fid] += 1
+            id_set[offset+block_size][fid] -= 1
+
         id_set_add[offset] |= fids
         id_set_sub[offset + block_size] |= fids
 
@@ -269,9 +320,11 @@ def search_db(args):
     running_set = set()
     file_set_at_offset = []
     last_set = None
+    '''
     for offset, delta in sorted(count_deltas.items()):
         cumulative_value += delta
         cumulative_counts[offset] = cumulative_value
+
 
         running_set -= id_set_sub[offset]
         running_set |= id_set_add[offset]
@@ -281,6 +334,19 @@ def search_db(args):
         last_set = set(running_set)
 
         file_set_at_offset.append((offset, set(running_set)))
+        '''
+
+    running_fid_count = defaultdict(int)
+    last_set = set()
+    for offset, set_counts in sorted(id_set.items()):
+        for fd, fd_delta in set_counts.items():
+            running_fid_count[fd] += fd_delta
+        new_set = set(fd for fd, count in running_fid_count.items() if count > 0)
+        if last_set == new_set:
+            continue
+        last_set = new_set
+        file_set_at_offset.append((offset, new_set))
+
 
     fid_name = {file_id: name
                 for file_id, name in
@@ -288,16 +354,47 @@ def search_db(args):
 
     displayed_fids = set()
     for offset, file_set in file_set_at_offset:
+
         fids_txt = ','.join([str(fid) for fid in sorted(file_set)])
-        new_fids = file_set - displayed_fids
-        new_fid_txt = ' '.join([f'{fid}:{fid_name[fid]}' for fid in sorted(new_fids)])
-        displayed_fids |= new_fids
 
-        print(f'Offset {offset:6x} {fids_txt}  {new_fid_txt}')
+        if len(file_set) <= 10:
+            fid_names = ' '.join(fid_name[fid] for fid in sorted(file_set))
+            print(f'Offset {offset:6x} {len(file_set):4} {fids_txt[:150]}  {fid_names}')
+        else:
+            new_fids = file_set - displayed_fids
+            if len(file_set) < 50:
+                new_fid_txt = ' '.join([f'{fid}:{fid_name[fid]}' for fid in sorted(new_fids)])
+                displayed_fids |= new_fids
+            else:
+                new_fid_txt = ''
+
+            print(f'Offset {offset:6x} {len(file_set):4} {fids_txt[:150]}  {new_fid_txt}')
 
 
-def ingest_files(hash_db_path, files_to_ingest):
-    pass
+def expand_paths(paths):
+    if isinstance(paths, (str, bytes)):
+        paths = [paths]
+
+    for path in paths:
+        if os.path.isdir(path):
+            for root, dirs, files in os.walk(path):
+                for file in files:
+                    yield os.path.join(root, file)
+        else:
+            yield path
+
+
+def ingest_files(hash_db_path, files_to_ingest, bs):
+    hash_db = SQLHashDB(hash_db_path, False)
+    for path in expand_paths(files_to_ingest):
+        print(f"Ingesting {path}")
+        hf = HashedFile(path)
+        fid = hash_db.add_file(path, hf.getWholeFileHash())
+
+        sector_gen = hf.genAlignedBlocks(bs=bs)
+
+        hash_db.add_hash_blocks(fid, sector_gen)
+    hash_db.populate_hashcount()
 
 
 usage = """
@@ -319,8 +416,6 @@ Options:
 def main():
     args = docopt.docopt(usage)
 
-    block_size = 128
-
     rebuild = args['--rebuild']
     hash_db_path = args['HASH_DB']
     if args['import']:
@@ -330,8 +425,7 @@ def main():
         search_db(args)
 
     if args['ingest']:
-        ingest_files(args['HASH_DB'], args['FILES'])
-
+        ingest_files(args['HASH_DB'], args['FILES'], int(args['--blocksize']))
 
 
 if __name__ == "__main__":

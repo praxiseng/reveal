@@ -122,7 +122,6 @@ class FileDB:
             paths = [path for path in paths if path not in self.paths_in_use]
 
         # Expand directories
-        file_paths = []
         for path in paths:
             if os.path.isdir(path):
                 for root, dirs, files in os.walk(path):
