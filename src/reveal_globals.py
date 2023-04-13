@@ -6,7 +6,7 @@ class Globs():
         self.MAX_LIST_SIZE = 1000
 
         # Whether to zero out bytes that look like they are PC-relative operands before hashing.
-        self.ZEROIZE_X86_PC_REL = True
+        self.ZEROIZE_X86_PC_REL = False
 
         # Clumps group a bunch of CBOR items in a larger bundle to reduce the Python serialization overhead.
         # IDEA: some form of clumps could be integrated with indexing.  The clump header could have some local

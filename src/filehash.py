@@ -1,3 +1,4 @@
+from typing import Generator
 
 import reveal_globals as rg
 import os
@@ -5,7 +6,6 @@ from util import *
 from hashlist import *
 from entropy import *
 import struct
-
 
 
 class Sector:
@@ -28,7 +28,7 @@ class Sector:
         e = entropy(self.data)
         we = word_entropy(self.data)
         de = dword_entropy(self.data)
-        #print(f"{self.offset:x} Entropy {e:.2f} {we:.2f} {de:.2f}")
+        # print(f"{self.offset:x} Entropy {e:.2f} {we:.2f} {de:.2f}")
         return e
 
 
@@ -51,29 +51,27 @@ class MemFile:
 
         try:
             while True:
-                offset = self.data.index(byte_val, offset+1)
+                offset = self.data.index(byte_val, offset + 1)
                 yield offset
         except ValueError:
             pass
-
 
     def zeroize(self, off, nbytes=4):
         self.n_removed += 1
 
         if self.n_removed % 100000 == 0:
             status.update('Zeroize', n_zeroize=self.n_removed)
-        for i in range(off, off+nbytes):
+        for i in range(off, off + nbytes):
             self.data[i] = 0
 
     def zeroize_if(self, off, min_val, max_val):
-        val, = struct.unpack('<i', self.data[off:off+4])
+        val, = struct.unpack('<i', self.data[off:off + 4])
         if min_val <= val < max_val:
             self.zeroize(off)
 
     def zeroize_x86_pc_rel(self):
-        MAX_REL = 2<<20
+        MAX_REL = 2 << 20
         MIN_REL = -MAX_REL
-
 
         n_removed = 0
 
@@ -84,8 +82,7 @@ class MemFile:
         offset = -1
         for opcode in [relcall, reljmp]:
             for offset in self.scan_byte(opcode):
-                self.zeroize(offset+1)
-
+                self.zeroize(offset + 1)
 
         lea = 0x8d
         mov_load = 0x8b
@@ -93,11 +90,11 @@ class MemFile:
         cmp = 0x39
         movsxd = 0x63
         coprocessor = [0xdb, 0xdb]
-        modrm_instructions =  [lea, mov_load, mov_store, cmp, movsxd] + coprocessor
+        modrm_instructions = [lea, mov_load, mov_store, cmp, movsxd] + coprocessor
 
         for opcode in modrm_instructions:
             for offset in self.scan_byte(opcode):
-                modrm = self.data[offset+1]
+                modrm = self.data[offset + 1]
                 is_pc_rel = (modrm & 0xc7) == 0x05
 
                 if not is_pc_rel:
@@ -108,7 +105,7 @@ class MemFile:
         offset = -1
 
         for offset in self.scan_byte(0x0f):
-            opcode_byte2 = self.data[offset+1]
+            opcode_byte2 = self.data[offset + 1]
 
             jmp_codes = list(range(0x80, 0x90))
             movdqa = 0x6f
@@ -119,22 +116,23 @@ class MemFile:
             self.zeroize(offset + 2)
 
         for offset in self.scan_byte(0xff):
-            opcode_byte2 = self.data[offset+1]
+            opcode_byte2 = self.data[offset + 1]
 
             near_call = 0x15
             if opcode_byte2 not in [near_call]:
                 continue
 
-            self.zeroize(offset+2)
+            self.zeroize(offset + 2)
 
-        #print(f'Removed {n_removed}')
+        # print(f'Removed {n_removed}')
         self.data = bytes(self.data)
 
     def __enter__(self):
         return FileCursor(self)
 
-    def __exit__(self ,type, value, traceback):
+    def __exit__(self, type, value, traceback):
         return False
+
 
 class FileCursor:
     def __init__(self, memfile):
@@ -142,14 +140,14 @@ class FileCursor:
         self.memfile = memfile
 
     def read(self, nbytes=None):
-        end = self.offset+nbytes if nbytes != None else None
+        end = self.offset + nbytes if nbytes != None else None
         data = self.memfile.data[self.offset:end]
         self.offset += len(data)
         return data
 
 
 class HashedFile:
-    def __init__(self, path, id = -1):
+    def __init__(self, path, id=-1):
         full_path = path
         try:
             full_path = os.path.realpath(path)
@@ -174,9 +172,8 @@ class HashedFile:
 
         self.file_data = None
 
-
     def openFile(self):
-        #return open(self.path, 'rb')
+        # return open(self.path, 'rb')
         if not self.file_data:
             self.file_data = MemFile(self.path)
         return self.file_data
@@ -187,8 +184,8 @@ class HashedFile:
         return self.whole_file_hash
 
     def getData(self):
-        return dict(path=self.path, 
-                    id=self.id, 
+        return dict(path=self.path,
+                    id=self.id,
                     md5=self.getWholeFileHash())
 
     def entropyValues(self, bs):
@@ -213,7 +210,7 @@ class HashedFile:
                 print(f"{offset:5x}: ", end='')
 
             print(f'{entropy_color2(e)}#{color.reset}', end='')
-            if (i+1) % COL == 0:
+            if (i + 1) % COL == 0:
                 print()
         print()
 
@@ -226,7 +223,7 @@ class HashedFile:
         last_hi = False
         last_change = 0
         for offset, e in entropies:
-            hi = e>threshold
+            hi = e > threshold
             if last_change == offset:
                 last_hi = hi
                 continue
@@ -237,7 +234,7 @@ class HashedFile:
                 last_hi = hi
                 last_change = offset
         if last_hi:
-            yield (last_change, offset+bs)
+            yield (last_change, offset + bs)
 
     def coarsen_ranges(self, ranges, block_size):
         """ Smooth over entropy holes so we include the adjacent high-entropy blocks. """
@@ -260,8 +257,8 @@ class HashedFile:
         # TODO: chunk large lists instead of iterating the whole thing
 
         status.start_process("Hashing",
-                             'Hash  ' + (' '*8) + '{sectors_hashed:<7} {filepath}',
-                             sectors_hashed = 0, filepath = self.path)
+                             'Hash  ' + (' ' * 8) + '{sectors_hashed:<7} {filepath}',
+                             sectors_hashed=0, filepath=self.path)
 
         sector_list = []
         sum_hashes = status.get('sum_hashes', 0)
@@ -269,12 +266,11 @@ class HashedFile:
         for sector in sectors:
             sector_list.append(sector.getHashTuple())
             if (sectors_hashed % 20000) == 0:
-                status.update("Hashing", sectors_hashed=sectors_hashed, sum_hashes=sum_hashes+sectors_hashed)
+                status.update("Hashing", sectors_hashed=sectors_hashed, sum_hashes=sum_hashes + sectors_hashed)
             sectors_hashed += 1
-        status.finish_process("Hashing", sectors_hashed=sectors_hashed, sum_hashes=sum_hashes+sectors_hashed)
+        status.finish_process("Hashing", sectors_hashed=sectors_hashed, sum_hashes=sum_hashes + sectors_hashed)
 
-
-        status.start_process("Sorting", 'Sort  ' + (' '*8) + '{sectors_hashed:<7} {filepath}')
+        status.start_process("Sorting", 'Sort  ' + (' ' * 8) + '{sectors_hashed:<7} {filepath}')
         sorted_sectors = sorted(sector_list)
         status.finish_process("Sorting")
 
@@ -299,12 +295,12 @@ class HashedFile:
                 status.update('Output',
                               sectors_written=sectors_written,
                               n_uniq_sectors=self.n_uniq_sectors,
-                              sum_uniq_hashes=sum_uniq+u.n_uniq_sectors)
+                              sum_uniq_hashes=sum_uniq + u.n_uniq_sectors)
 
         status.finish_process('Output',
                               sectors_written=sectors_written,
                               n_uniq_sectors=self.n_uniq_sectors,
-                              sum_uniq_hashes=sum_uniq+u.n_uniq_sectors)
+                              sum_uniq_hashes=sum_uniq + u.n_uniq_sectors)
 
         return (sectors_hashed, self.n_uniq_sectors)
 
@@ -319,12 +315,18 @@ class HashedFile:
                 yield Sector(self, data, offset)
                 offset += bs
 
-    def genRollingBlocks(self, bs=10, step=1, offset=0, short_blocks=False, entropy_ranges=None, limit_range=None):
+    def genRollingBlocks(self,
+                         bs=10,
+                         step=1,
+                         offset=0,
+                         short_blocks=False,
+                         entropy_ranges=None,
+                         limit_range=None) -> Generator[Sector, None, None]:
         with self.openFile() as in_fd:
             lo, hi = None, None
             if limit_range:
                 lo, hi = limit_range
-                offset+=lo
+                offset += lo
                 in_fd.read(lo)
             data = in_fd.read(bs)
             while True:
@@ -341,7 +343,8 @@ class HashedFile:
                 if hi and offset >= hi:
                     break
 
-    def hashBlocksToFile(self, block_size, out_file_path, short_blocks=False, uniq=True, entropy_threshold=0.2) -> HashListFile:
+    def hashBlocksToFile(self, block_size, out_file_path, short_blocks=False, uniq=True, entropy_threshold=0.2) \
+            -> HashListFile:
         hl = HashListFile(out_file_path)
         out_file = hl.createFile(self,
                                  block_size,
@@ -355,7 +358,6 @@ class HashedFile:
 
     def get_entropy_ranges(self, block_size, entropy_threshold):
         if self.entropy_block_size != block_size or self.entropy_threshold != entropy_threshold:
-
             self.entropy_block_size = block_size
             self.entropy_threshold = entropy_threshold
 
@@ -366,7 +368,7 @@ class HashedFile:
 
     def filter_sector_entropy(self, sectors, block_size, threshold=0.2, overlap=None):
         if overlap == None:
-            overlap = block_size//2
+            overlap = block_size // 2
 
         range_iter = iter(self.get_entropy_ranges(block_size, threshold))
 
@@ -414,7 +416,7 @@ class HashedFile:
             print(f"Range {lo:5x}-{hi:5x}")
         # block_gen = sectorEntropyFilter(0.5, block_gen)
 
-        #sys.exit()
+        # sys.exit()
 
         block_gen = self.filter_sector_entropy(block_gen, block_size, threshold=entropy_threshold)
         self.genericSectorHash(block_gen, output, uniq=uniq)
