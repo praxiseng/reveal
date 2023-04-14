@@ -9,6 +9,8 @@ from typing import Generator
 
 import docopt
 
+import gui
+
 from filehash import Sector, HashedFile
 import cbor2
 
@@ -107,7 +109,6 @@ class SQLHashDB:
 
     def import_nsrl_file_list(self,
                               input_db: sqlite3.Connection):
-
         insert_query = """INSERT INTO FILES
             (name, file_hash, metadata_id)
             VALUES (?, ?, ?)
@@ -199,7 +200,7 @@ class SQLHashDB:
         input_db = sqlite3.connect(input_db_path)
 
         print(f'Listing Files')
-        self.convert_nsrl_file_list(input_db)
+        self.import_nsrl_file_list(input_db)
 
         print(f'Populating HASHFILES')
         self.convert_nsrl_hashfiles(input_db)
@@ -268,11 +269,11 @@ class RollingSearchDB:
 def import_nsrl_db(hash_db_path, nsrl_db_path, rebuild=False):
     if rebuild or not os.path.exists(hash_db_path):
         hash_db = SQLHashDB(hash_db_path, rebuild)
-        hash_db.import_nsrl_to_sector_db(nsrl_db_path)
+        hash_db.convert_nsrl_to_sector_db(nsrl_db_path)
         hash_db.close()
 
 
-def search_db(args):
+def search_file_in_hashdb(args):
     block_size = int(args['--blocksize'])
 
     rebuild = args['--rebuild']
@@ -348,27 +349,34 @@ def search_db(args):
         file_set_at_offset.append((offset, new_set))
 
 
-    fid_name = {file_id: name
+    fid_to_name = {file_id: name
                 for file_id, name in
                 rowgen2(sql_db, "SELECT file_id, name FROM FILES")}
 
     displayed_fids = set()
+
     for offset, file_set in file_set_at_offset:
 
         fids_txt = ','.join([str(fid) for fid in sorted(file_set)])
 
         if len(file_set) <= 10:
-            fid_names = ' '.join(fid_name[fid] for fid in sorted(file_set))
+            fid_names = ' '.join(fid_to_name[fid] for fid in sorted(file_set))
             print(f'Offset {offset:6x} {len(file_set):4} {fids_txt[:150]}  {fid_names}')
         else:
             new_fids = file_set - displayed_fids
             if len(file_set) < 50:
-                new_fid_txt = ' '.join([f'{fid}:{fid_name[fid]}' for fid in sorted(new_fids)])
+                new_fid_txt = ' '.join([f'{fid}:{fid_to_name[fid]}' for fid in sorted(new_fids)])
                 displayed_fids |= new_fids
             else:
                 new_fid_txt = ''
 
             print(f'Offset {offset:6x} {len(file_set):4} {fids_txt[:150]}  {new_fid_txt}')
+
+
+    gui_view = gui.FileView(search_file)
+
+    gui_view.set_counts(file_set_at_offset, fid_to_name)
+    gui_view.event_loop()
 
 
 def expand_paths(paths):
@@ -422,10 +430,12 @@ def main():
         import_nsrl_db(args['HASH_DB'], args['NSRL_DB'], args['--rebuild'])
 
     if args['search']:
-        search_db(args)
+        search_file_in_hashdb(args)
 
     if args['ingest']:
         ingest_files(args['HASH_DB'], args['FILES'], int(args['--blocksize']))
+
+
 
 
 if __name__ == "__main__":

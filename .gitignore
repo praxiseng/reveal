@@ -9,3 +9,4 @@ build
 .vscode
 __pycache__
 bins
+*.sqlite
