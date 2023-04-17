@@ -33,7 +33,7 @@ class Sector:
 
 
 class MemFile:
-    def __init__(self, path):
+    def __init__(self, path, zeroize):
         self.n_removed = 0
 
         with open(path, 'rb') as fd:
@@ -41,10 +41,10 @@ class MemFile:
 
         self.offset = 0
 
-        if rg.globs.ZEROIZE_X86_PC_REL:
-            status.start_process('Zeroize', 'Zeroizing    {n_zeroize:8} {filename}', n_zeroize=0, filename=path)
+        if zeroize:
+            # status.start_process('Zeroize', 'Zeroizing    {n_zeroize:8} {filename}', n_zeroize=0, filename=path)
             self.zeroize_x86_pc_rel()
-            status.finish_process('Zeroize', n_zeroize=self.n_removed)
+            # status.finish_process('Zeroize', n_zeroize=self.n_removed)
 
     def scan_byte(self, byte_val):
         offset = -1
@@ -59,8 +59,8 @@ class MemFile:
     def zeroize(self, off, nbytes=4):
         self.n_removed += 1
 
-        if self.n_removed % 100000 == 0:
-            status.update('Zeroize', n_zeroize=self.n_removed)
+        # if self.n_removed % 100000 == 0:
+        #     status.update('Zeroize', n_zeroize=self.n_removed)
         for i in range(off, off + nbytes):
             self.data[i] = 0
 
@@ -175,7 +175,7 @@ class HashedFile:
     def openFile(self):
         # return open(self.path, 'rb')
         if not self.file_data:
-            self.file_data = MemFile(self.path)
+            self.file_data = MemFile(self.path, rg.globs.ZEROIZE_X86_PC_REL)
         return self.file_data
 
     def getWholeFileHash(self):

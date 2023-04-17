@@ -1,6 +1,7 @@
 import itertools
 import math
 import sys
+import filehash
 
 import PySimpleGUI as sg
 
@@ -8,11 +9,11 @@ from intervaltree import Interval, IntervalTree
 
 
 def my_log(x: int, max_value = 1000, pixel_height=200) -> int:
-    if x == 0:
-        return x
-    result = 0
+    #if x == 0:
+    #    return x
+    #result = 0
 
-    return int(math.log(x)/math.log(max_value)*pixel_height)
+    return int(math.log(x+1)/math.log(max_value)*pixel_height)
 
 class FileView:
 
@@ -21,13 +22,22 @@ class FileView:
         with open(path, 'rb') as fd:
             self.contents = fd.read()
 
+        self.zeroized_file = filehash.MemFile(path, True).data
+
         self.hover_x = 0
         self.hover_y = 0
         self.hover_line = None
 
+        self.file_counts = None
+        self.hash_counts = None
         self.file_set_at_offset = None
 
         self.init_graph()
+
+        self.file_count_intervals: IntervalTree | None = None
+        self.hash_count_intervals: IntervalTree | None = None
+
+        self.match_set_counts = None
 
         self.file_intervals: IntervalTree | None = None
 
@@ -81,9 +91,38 @@ class FileView:
         if file_offset >= 0:
             file_bytes = self.contents[file_offset:file_offset + 128]
             byte_columns = 32
-            for offset in range(0, len(file_bytes), byte_columns):
-                hex_bytes = file_bytes[offset:offset + byte_columns].hex()
-                txt.print(hex_bytes, text_color='black')
+            byte_separator = 8
+            for offset in range(0, len(file_bytes)):
+                full_offset = file_offset+offset
+                if offset % byte_columns == 0:
+                    if offset:
+                        txt.print('')
+                    txt.print(f'{full_offset:6x}: ', end='')
+                if full_offset % byte_separator == 0:
+                    txt.print(' ', end='')
+
+                hex_bytes = self.contents[full_offset:full_offset+1].hex()
+                z_bytes = self.zeroized_file[full_offset:full_offset+1].hex()
+                if hex_bytes == z_bytes:
+                    txt.print(hex_bytes, end='', text_color='black', font = ('Fira Code', 12))
+                else:
+                    txt.print(hex_bytes, end='', text_color='grey24', font = ('Fira Code', 12, 'underline'))
+
+            txt.print('')
+
+
+        if self.file_count_intervals:
+            interval: set[Interval] = self.file_count_intervals.at(file_offset)
+            if interval:
+                file_count = sorted(interval)[0].data
+                txt.print(f'Matches {file_count} files by count')
+
+        if self.hash_count_intervals:
+            interval: set[Interval] = self.hash_count_intervals.at(file_offset)
+            if interval:
+                hash_count = sorted(interval)[0].data
+                txt.print(f'Matches {hash_count} hashes by count')
+
 
         if self.file_intervals:
             interval: set[Interval] = self.file_intervals.at(file_offset)
@@ -93,7 +132,7 @@ class FileView:
                     txt.print(f'Matches {len(file_set)} files', font=('Fira Code', 12, 'bold'))
                 # print(f'File_set = {file_set}')
                 fnames = [self.fid_to_name.get(fid, str(fid)) for fid in file_set]
-                txt.print(' '.join(sorted(fnames)[:50]))
+                txt.print(' '.join(sorted(fnames)[:100]))
 
     def update_hover_line(self):
         if self.hover_line is not None:
@@ -119,37 +158,124 @@ class FileView:
         self.redraw_graph()
 
     def draw_file_sets(self):
-        if not self.file_set_at_offset:
+        if not self.file_counts:
             return
 
-        for current, next_set in itertools.pairwise(self.file_set_at_offset):
-            file_offset, file_set = current
-            next_offset, next_set = next_set
+        # print(f'Lengths {len(self.file_counts)} {len(self.file_set_at_offset)}')
+        draw_just_counts = False
+        if draw_just_counts:
+            for current, next_count in itertools.pairwise(self.file_counts):
+                file_offset, match_count = current
+                next_offset, next_set = next_count
 
-            canvas_x1 = self.file_to_canvas_offset(file_offset)
-            canvas_x2 = self.file_to_canvas_offset(next_offset)
+                canvas_x1 = self.file_to_canvas_offset(file_offset)
+                canvas_x2 = self.file_to_canvas_offset(next_offset)
 
-            #height = len(file_set)*2
+                height = my_log(match_count)
 
-            height = my_log(len(file_set))
+                self.graph.draw_rectangle((canvas_x1, height), (canvas_x2, 0), fill_color='green', line_width=0)
 
-            self.graph.draw_rectangle((canvas_x1, height), (canvas_x2, 0), fill_color='green', line_width=0)
+        else:
+            if not self.file_set_at_offset:
+                return
 
+            for current, next_set in itertools.pairwise(self.file_set_at_offset):
+                file_offset, file_set = current
+                next_offset, next_set = next_set
 
-    def set_counts(self, file_set_at_offset, fid_name):
+                fs = frozenset(file_set)
+
+                canvas_x1 = self.file_to_canvas_offset(file_offset)
+                canvas_x2 = self.file_to_canvas_offset(next_offset)
+
+                #height = len(file_set)*2
+
+                height = my_log(len(file_set))
+
+                self.graph.draw_rectangle((canvas_x1, height), (canvas_x2, 0),
+                                          fill_color=self.match_set_colors.get(fs, 'green'),
+                                          line_width=0)
+
+    def make_interval(self, offset_obj):
+        it = IntervalTree()
+        for current, next_obj in itertools.pairwise(offset_obj):
+            file_offset, current_obj = current
+            next_offset, next_obj = next_obj
+
+            it[file_offset:next_offset] = current_obj
+        return it
+
+    def set_counts(self, file_counts, hash_counts, file_set_at_offset, fid_name, match_set_counts):
+        self.file_counts = file_counts
+        self.hash_counts = hash_counts
         self.file_set_at_offset = file_set_at_offset
         self.fid_to_name = fid_name
+        self.match_set_counts = match_set_counts
+
+        class MatchSet:
+            def __init__(self, file_set, count_of_bytes):
+                self.file_set = frozenset(file_set)
+                self.count_of_bytes = count_of_bytes
+                self.color = None
+
+            def similarity(self, other):
+                return len(self.file_set & other.file_set) / len(self.file_set | other.file_set)
+
+        match_sets = [MatchSet(file_set, count_of_bytes) for file_set, count_of_bytes in match_set_counts]
+
+        colors = ['steel blue',
+                  'tan1',
+                  'yellow',
+                  'tomato',
+                  'turquoise',
+                  'violet',
+                  'dark red',
+                  'purple',
+                  'GreenYellow',
+                  'deep pink',
+                  'hot pink']
+
+        #self.match_set_colors = {
+        #    match_set[0]:color for color, match_set in zip(colors, reversed(match_set_counts))
+        #}
+
+        color_families = [
+            [f'{base_color}{n}' for n in range(1,4)] for base_color in
+            ['RoyalBlue', 'SkyBlue', 'LemonChiffon', 'Pink', 'tan', 'wheat',
+             'orange', 'OrangeRed', 'VioletRed', 'SpringGreen', 'HotPink', 'Goldenrod']
+        ]
+
+        sets_by_size = sorted(match_sets, key=lambda ms: -ms.count_of_bytes)
+        current_set_index = 0
+        for family in color_families:
+            current_set = None
+            while not current_set or current_set.color:
+                current_set = sets_by_size[current_set_index]
+                current_set_index += 1
+
+            current_set.color = family[0]
+
+            remaining_colors = family[1:]
+            other_color_index = 0
+            for other in match_sets:
+                if other.color:
+                    continue
+                if current_set.similarity(other) > 0.80:
+                    other.color = remaining_colors[other_color_index % len(remaining_colors)]
+                    other_color_index += 1
+
+        self.match_set_colors = {
+            match_set.file_set : match_set.color for match_set in match_sets if match_set.color
+        }
+
+
+        print(f'Match set colors: {self.match_set_colors}')
+
         self.draw_file_sets()
 
-        self.file_intervals = IntervalTree()
-
-        for current, next_set in itertools.pairwise(self.file_set_at_offset):
-
-            file_offset, file_set = current
-            next_offset, next_set = next_set
-
-            self.file_intervals[file_offset:next_offset] = file_set
-
+        self.file_intervals = self.make_interval(self.file_set_at_offset)
+        self.file_count_intervals = self.make_interval(self.file_counts)
+        self.hash_count_intervals = self.make_interval(self.hash_counts)
 
     def event_loop(self):
         self.adjust_sizes()
@@ -167,7 +293,7 @@ class FileView:
             if 'RESIZE' in event:
                 self.adjust_sizes()
             if 'MOUSEWHEEL' in event:
-                print(f"Mouse {self.graph.user_bind_event.delta}")
+                # print(f"Mouse {self.graph.user_bind_event.delta}")
                 mouse_steps = int(self.graph.user_bind_event.delta/120)
                 file_range = self.file_x_end - self.file_x_start
                 if mouse_steps < 0:
@@ -183,7 +309,7 @@ class FileView:
                     self.file_x_start += left // 5
                     self.file_x_end -= right // 5
 
-                print(f'X range {self.file_x_start}  {self.file_x_end}')
+                # print(f'X range {self.file_x_start}  {self.file_x_end}')
                 overshoot = len(self.contents) // 10
 
                 if self.file_x_start < -overshoot:

@@ -63,7 +63,7 @@ class SQLHashDB:
             offset integer not null,
             file_id integer not null,
             PRIMARY KEY(hash_id, file_id, offset)
-            FOREIGN KEY(file_id) REFERENCES FILES(id)
+            FOREIGN KEY(file_id) REFERENCES FILES(file_id)
         ) WITHOUT ROWID
         ''',
         '''
@@ -191,8 +191,8 @@ class SQLHashDB:
         self.db_connection.execute("DELETE FROM HASHCOUNT")
         self.db_connection.commit()
         self.db_connection.execute("""
-            INSERT INTO HASHCOUNT
-            SELECT hash_id, count(*) as hash_count, count(DISTINCT file_id) as file_count FROM HASHFILES GROUP BY hash_id
+            INSERT INTO HASHCOUNT (hash_id, file_count, hash_count)
+            SELECT hash_id, count(DISTINCT file_id) as file_count, count(*) as hash_count FROM HASHFILES GROUP BY hash_id
         """)
         self.db_connection.commit()
 
@@ -273,69 +273,41 @@ def import_nsrl_db(hash_db_path, nsrl_db_path, rebuild=False):
         hash_db.close()
 
 
-def search_file_in_hashdb(args):
-    block_size = int(args['--blocksize'])
-
-    rebuild = args['--rebuild']
-    hash_db_path = args['HASH_DB']
-
-    search_db_path = args['SEARCH_DB']
-    search_file = args['SEARCH_FILE']
-    if rebuild or not os.path.exists(search_db_path):
-        search_db = RollingSearchDB(search_db_path, rebuild)
-        search_db.rolling_hash(search_file, block_size)
-        search_db.close()
-
-    sql_db = sqlite3.connect(hash_db_path)
-    sql_db.execute(f'ATTACH DATABASE "{search_db_path}" AS SEARCH')
-
-    count_hashes = list(rowgen2(sql_db, f'''
-        SELECT HC.hash_id, HC.file_count, HC.hash_count, RH.offset, FILE_NAMES, FILE_IDS
-        FROM HASHCOUNT AS HC 
-        INNER JOIN SEARCH.ROLLING_HASH as RH ON HC.hash_id == RH.hash_id
-        LEFT JOIN HASH_FILE_NAMES on HASH_FILE_NAMES.hash_id == HC.hash_id
-        ORDER BY RH.offset'''))
-
-    count_deltas = defaultdict(int)
-    id_set_add = defaultdict(set)
-    id_set_sub = defaultdict(set)
-    id_set = defaultdict(lambda:defaultdict(int))
-
-    for hash_id, file_count, hash_count, offset, file_names, file_ids in count_hashes:
-
-        #print(f'{offset:6x} {file_names}')
-        count_deltas[offset] += file_count
-        count_deltas[offset + block_size] -= file_count
-
-        fids = set(int(fid) for fid in file_ids.split(','))
-
-        for fid in fids:
-            id_set[offset][fid] += 1
-            id_set[offset+block_size][fid] -= 1
-
-        id_set_add[offset] |= fids
-        id_set_sub[offset + block_size] |= fids
-
-    cumulative_counts = {}
-    cumulative_value = 0
-    running_set = set()
-    file_set_at_offset = []
-    last_set = None
-    '''
+def accumulate_deltas(count_deltas : dict[int, int]) -> list[tuple[int, int]]:
+    """
+    When querying HASHCOUNT, we get match counts at different offsets that extend over the sector,
+    and these sectors can overlap.  This function accumulates the overlapping counts from the
+    run_search_query function to get the total count at each specific offset.
+    """
+    counts = []
+    accumulation = 0
+    last_count = None
     for offset, delta in sorted(count_deltas.items()):
-        cumulative_value += delta
-        cumulative_counts[offset] = cumulative_value
-
-
-        running_set -= id_set_sub[offset]
-        running_set |= id_set_add[offset]
-
-        if last_set == running_set:
+        last_count = (offset, accumulation, delta)
+        if not delta:
             continue
-        last_set = set(running_set)
+        accumulation += delta
+        counts.append((offset, accumulation))
 
-        file_set_at_offset.append((offset, set(running_set)))
-        '''
+    if not counts:
+        return counts
+
+    if last_count:
+        offset, accumulation, delta = last_count
+        if not delta:
+            # Ensure we keep the very last offset so that we can track the very
+            # last block change closest to the end of the file.
+            counts.append((offset, accumulation))
+
+    return counts
+
+
+def accumulate_fid_sets(id_set: tuple[int, set[int]]) -> list[tuple[int, set[int]]]:
+    """ The input id_set will have a list of files that matched beginning at the specified
+        offsets.  However, previous matches may overlap the current interval.  This function
+        accumulates the list of all files matching at each offset that has a set change.
+    """
+    file_set_at_offset = []
 
     running_fid_count = defaultdict(int)
     last_set = set()
@@ -348,15 +320,53 @@ def search_file_in_hashdb(args):
         last_set = new_set
         file_set_at_offset.append((offset, new_set))
 
+    return file_set_at_offset
 
-    fid_to_name = {file_id: name
-                for file_id, name in
-                rowgen2(sql_db, "SELECT file_id, name FROM FILES")}
 
+def run_search_query(hash_db_path, search_db_path, search_file, rebuild_search_db, block_size):
+    if rebuild_search_db or not os.path.exists(search_db_path):
+        search_db = RollingSearchDB(search_db_path, rebuild_search_db)
+        search_db.rolling_hash(search_file, block_size)
+        search_db.close()
+
+    sql_db = sqlite3.connect(hash_db_path)
+    sql_db.execute(f'ATTACH DATABASE "{search_db_path}" AS SEARCH')
+
+    count_hashes = list(rowgen2(sql_db, f'''
+         SELECT HC.hash_id, HC.file_count, HC.hash_count, RH.offset, FILE_NAMES, FILE_IDS
+         FROM HASHCOUNT AS HC 
+         INNER JOIN SEARCH.ROLLING_HASH as RH ON HC.hash_id == RH.hash_id
+         LEFT JOIN HASH_FILE_NAMES on HASH_FILE_NAMES.hash_id == HC.hash_id
+         ORDER BY RH.offset'''))
+
+    file_count_deltas = defaultdict(int)
+    hash_count_deltas = defaultdict(int)
+    id_set = defaultdict(lambda: defaultdict(int))
+
+    print(f'Ran count_hashes')
+    for hash_id, file_count, hash_count, offset, file_names, file_ids in count_hashes:
+        file_count_deltas[offset] += file_count
+        file_count_deltas[offset + block_size] -= file_count
+
+        hash_count_deltas[offset] += hash_count
+        hash_count_deltas[offset + block_size] -= hash_count
+
+        fids = set(int(fid) for fid in (file_ids).split(',')) if file_ids else set()
+
+        for fid in fids:
+            id_set[offset][fid] += 1
+            id_set[offset + block_size][fid] -= 1
+
+    file_counts = accumulate_deltas(file_count_deltas)
+    hash_counts = accumulate_deltas(hash_count_deltas)
+    fid_set = accumulate_fid_sets(id_set)
+
+    return file_counts, hash_counts, fid_set
+
+
+def display_fid_sets(fid_set, fid_to_name):
     displayed_fids = set()
-
-    for offset, file_set in file_set_at_offset:
-
+    for offset, file_set in fid_set:
         fids_txt = ','.join([str(fid) for fid in sorted(file_set)])
 
         if len(file_set) <= 10:
@@ -372,10 +382,55 @@ def search_file_in_hashdb(args):
 
             print(f'Offset {offset:6x} {len(file_set):4} {fids_txt[:150]}  {new_fid_txt}')
 
+def match_set_analysis(fid_set, fid_to_name):
 
+    set_byte_count = defaultdict(int)
+
+    for current, next_set in itertools.pairwise(fid_set):
+        offset, file_set = current
+        next_offset, next_set = next_set
+
+        length = next_offset - offset
+        set_byte_count[frozenset(file_set)] += length
+
+    counts = sorted(set_byte_count.items(), key=lambda x: x[1])
+
+    for file_set, length in counts:
+        fid_names = ' '.join(fid_to_name[fid] for fid in sorted(file_set)[:20])
+        print(f'{length:6x} bytes, {len(file_set):3} files {fid_names}')
+
+    return counts
+
+
+def search_file_in_hashdb(args):
+    block_size = int(args['--blocksize'])
+
+    rebuild = args['--rebuild']
+    hash_db_path = args['HASH_DB']
+
+    search_db_path = args['SEARCH_DB']
+    search_file = args['SEARCH_FILE']
+
+    print(f'Running search query')
+    file_counts, hash_counts, fid_set = run_search_query(hash_db_path, search_db_path, search_file, rebuild, block_size)
+
+
+    print(f'Listing files')
+    sql_db = sqlite3.connect(hash_db_path)
+    fid_to_name = {file_id: name
+                    for file_id, name in
+                    rowgen2(sql_db, "SELECT file_id, name FROM FILES")}
+
+    display_fid_sets(fid_set, fid_to_name)
+
+    match_set_counts = match_set_analysis(fid_set, fid_to_name)
+
+    print(f'Initializing GUI')
     gui_view = gui.FileView(search_file)
 
-    gui_view.set_counts(file_set_at_offset, fid_to_name)
+    gui_view.set_counts(file_counts, hash_counts, fid_set, fid_to_name, match_set_counts)
+
+    print(f'Entering GUI event loop')
     gui_view.event_loop()
 
 
@@ -409,9 +464,9 @@ usage = """
 REVeal SQL Database Tool
 
 Usage:
+    sql_db ingest HASH_DB FILES...
     sql_db import HASH_DB NSRL_DB [options]
     sql_db search HASH_DB SEARCH_DB SEARCH_FILE [options]
-    sql_db ingest HASH_DB FILES...
 
 Options:
     --rebuild         When creating a database, delete that database and make a clean one.
@@ -426,15 +481,15 @@ def main():
 
     rebuild = args['--rebuild']
     hash_db_path = args['HASH_DB']
+
+    if args['ingest']:
+        ingest_files(args['HASH_DB'], args['FILES'], int(args['--blocksize']))
+
     if args['import']:
         import_nsrl_db(args['HASH_DB'], args['NSRL_DB'], args['--rebuild'])
 
     if args['search']:
         search_file_in_hashdb(args)
-
-    if args['ingest']:
-        ingest_files(args['HASH_DB'], args['FILES'], int(args['--blocksize']))
-
 
 
 
