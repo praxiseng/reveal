@@ -273,54 +273,107 @@ def import_nsrl_db(hash_db_path, nsrl_db_path, rebuild=False):
         hash_db.close()
 
 
-def accumulate_deltas(count_deltas : dict[int, int]) -> list[tuple[int, int]]:
+
+class OffsetCount:
+    def __init__(self, offset):
+        self.offset = offset
+        self.length = 0
+
+        # When representing raw/delta counts, values can be negative (i.e. stop matching some files)
+        # When representing cumulative counts, should always be positive
+        self.fileCount = 0
+        self.hashCount = 0
+
+        # Maintain a count per-file so we can add positive/negative values.
+        # The accumulator may count a file multiple times if it has multiple overlapping matches.
+        self.fid_set = defaultdict(int)
+
+        self._frozen = None
+
+    def get_frozen_set(self):
+        if not self.has_file_list():
+            return None
+
+        if self._frozen == None:
+            self._frozen = frozenset(fid for fid, count in self.fid_set.items() if count)
+        return self._frozen
+
+    def has_file_list(self):
+        return self.fileCount and self.fid_set # and self.fileCount < len(self.fid_set) * 2
+
+    def get_count(self):
+
+        return self.fileCount
+
+        # if self.has_file_list():
+        #     return len(self.fid_set)
+        # else:
+        #     return self.fileCount
+
+
+class MatchSet:
+    def __init__(self, file_set, count_of_bytes = 0):
+        self.file_set = frozenset(file_set)
+        self.count_of_bytes = count_of_bytes
+        self.match_ranges = []
+
+        # For use with GUI processing
+        self.color = None
+
+    def add_match_range(self, lo, hi):
+        # WARNING: this is not designed to handle overlapping ranges
+        self.match_ranges.append((lo, hi))
+        self.count_of_bytes += hi - lo
+
+    def similarity(self, other):
+        return len(self.file_set & other.file_set) / len(self.file_set | other.file_set)
+
+
+def accumulate(count_deltas : dict[int, OffsetCount]) -> list[OffsetCount]:
     """
     When querying HASHCOUNT, we get match counts at different offsets that extend over the sector,
     and these sectors can overlap.  This function accumulates the overlapping counts from the
     run_search_query function to get the total count at each specific offset.
     """
     counts = []
-    accumulation = 0
-    last_count = None
-    for offset, delta in sorted(count_deltas.items()):
-        last_count = (offset, accumulation, delta)
-        if not delta:
+
+    sum_file_count = 0
+    sum_hash_count = 0
+    sum_fid_counts = defaultdict(int)
+
+    lastCounts = None
+
+    for offset, deltaCount in sorted(count_deltas.items()):
+        deltaCount : OffsetCount
+
+        # Simple counts are the easiest - just add the delta value
+        sum_file_count += deltaCount.fileCount
+        sum_hash_count += deltaCount.hashCount
+
+        for fd, fd_delta in deltaCount.fid_set.items():
+            sum_fid_counts[fd] += fd_delta
+
+        # Prune zero-count items so that we don't maintain a huge list for the rest of the file
+        # Also ensures the copy in the accumulation only has positive-valued counts.  This also enables
+        # using frozenset(sum_fid_counts.keys()) as a lookup key to find offsets with the same match set.
+        sum_fid_counts = defaultdict(int, {off : count for off, count in sum_fid_counts.items() if count != 0})
+
+        newCounts = (sum_file_count, sum_hash_count, dict(sum_fid_counts))
+        if lastCounts == newCounts:
             continue
-        accumulation += delta
-        counts.append((offset, accumulation))
+        lastCounts = newCounts
 
-    if not counts:
-        return counts
+        accumulation = OffsetCount(offset)
+        accumulation.fileCount = sum_file_count
+        accumulation.hashCount = sum_hash_count
+        accumulation.fid_set = dict(sum_fid_counts)
 
-    if last_count:
-        offset, accumulation, delta = last_count
-        if not delta:
-            # Ensure we keep the very last offset so that we can track the very
-            # last block change closest to the end of the file.
-            counts.append((offset, accumulation))
+        counts.append(accumulation)
+
+    for a, b in itertools.pairwise(counts):
+        a.length = b.offset - a.offset
 
     return counts
-
-
-def accumulate_fid_sets(id_set: tuple[int, set[int]]) -> list[tuple[int, set[int]]]:
-    """ The input id_set will have a list of files that matched beginning at the specified
-        offsets.  However, previous matches may overlap the current interval.  This function
-        accumulates the list of all files matching at each offset that has a set change.
-    """
-    file_set_at_offset = []
-
-    running_fid_count = defaultdict(int)
-    last_set = set()
-    for offset, set_counts in sorted(id_set.items()):
-        for fd, fd_delta in set_counts.items():
-            running_fid_count[fd] += fd_delta
-        new_set = set(fd for fd, count in running_fid_count.items() if count > 0)
-        if last_set == new_set:
-            continue
-        last_set = new_set
-        file_set_at_offset.append((offset, new_set))
-
-    return file_set_at_offset
 
 
 def run_search_query(hash_db_path, search_db_path, search_file, rebuild_search_db, block_size):
@@ -332,74 +385,54 @@ def run_search_query(hash_db_path, search_db_path, search_file, rebuild_search_d
     sql_db = sqlite3.connect(hash_db_path)
     sql_db.execute(f'ATTACH DATABASE "{search_db_path}" AS SEARCH')
 
-    count_hashes = list(rowgen2(sql_db, f'''
-         SELECT HC.hash_id, HC.file_count, HC.hash_count, RH.offset, FILE_NAMES, FILE_IDS
+    count_hashes = rowgen2(sql_db, f'''
+         SELECT HC.hash_id, HC.file_count, HC.hash_count, RH.offset, HFN.FILE_NAMES, HFN.FILE_IDS
          FROM HASHCOUNT AS HC 
          INNER JOIN SEARCH.ROLLING_HASH as RH ON HC.hash_id == RH.hash_id
-         LEFT JOIN HASH_FILE_NAMES on HASH_FILE_NAMES.hash_id == HC.hash_id
-         ORDER BY RH.offset'''))
+         LEFT JOIN HASH_FILE_NAMES AS HFN on HFN.hash_id == HC.hash_id AND HC.file_count < 1000
+         ORDER BY RH.offset''')
 
-    file_count_deltas = defaultdict(int)
-    hash_count_deltas = defaultdict(int)
-    id_set = defaultdict(lambda: defaultdict(int))
+    offsetCounts = {}
 
-    print(f'Ran count_hashes')
     for hash_id, file_count, hash_count, offset, file_names, file_ids in count_hashes:
-        file_count_deltas[offset] += file_count
-        file_count_deltas[offset + block_size] -= file_count
+        offset2 = offset+block_size
 
-        hash_count_deltas[offset] += hash_count
-        hash_count_deltas[offset + block_size] -= hash_count
+        count1 = offsetCounts.setdefault(offset, OffsetCount(offset))
+        count2 = offsetCounts.setdefault(offset2, OffsetCount(offset2))
 
-        fids = set(int(fid) for fid in (file_ids).split(',')) if file_ids else set()
+        count1.fileCount += file_count
+        count2.fileCount -= file_count
+        count1.hashCount += hash_count
+        count2.hashCount -= hash_count
+
+        fids = set(int(fid) for fid in file_ids.split(',')) if file_ids else set()
 
         for fid in fids:
-            id_set[offset][fid] += 1
-            id_set[offset + block_size][fid] -= 1
+            count1.fid_set[fid] += 1
+            count2.fid_set[fid] -= 1
 
-    file_counts = accumulate_deltas(file_count_deltas)
-    hash_counts = accumulate_deltas(hash_count_deltas)
-    fid_set = accumulate_fid_sets(id_set)
-
-    return file_counts, hash_counts, fid_set
+    return offsetCounts
 
 
-def display_fid_sets(fid_set, fid_to_name):
-    displayed_fids = set()
-    for offset, file_set in fid_set:
-        fids_txt = ','.join([str(fid) for fid in sorted(file_set)])
+def match_set_analysis(cumulative_counts: list[OffsetCount]) -> list[MatchSet]:
+    match_sets = {}
 
-        if len(file_set) <= 10:
-            fid_names = ' '.join(fid_to_name[fid] for fid in sorted(file_set))
-            print(f'Offset {offset:6x} {len(file_set):4} {fids_txt[:150]}  {fid_names}')
+    for count in cumulative_counts:
+        if not count.has_file_list():
+            continue
+
+        fs = count.get_frozen_set()
+
+        # TODO: ensure the count actually contains the set and is not just a count-only value
+        if fs in match_sets:
+            ms = match_sets[fs]
         else:
-            new_fids = file_set - displayed_fids
-            if len(file_set) < 50:
-                new_fid_txt = ' '.join([f'{fid}:{fid_to_name[fid]}' for fid in sorted(new_fids)])
-                displayed_fids |= new_fids
-            else:
-                new_fid_txt = ''
+            ms = MatchSet(fs)
+            match_sets[fs] = ms
 
-            print(f'Offset {offset:6x} {len(file_set):4} {fids_txt[:150]}  {new_fid_txt}')
+        ms.add_match_range(count.offset, count.offset+count.length)
 
-def match_set_analysis(fid_set, fid_to_name):
-
-    set_byte_count = defaultdict(int)
-
-    for current, next_set in itertools.pairwise(fid_set):
-        offset, file_set = current
-        next_offset, next_set = next_set
-
-        length = next_offset - offset
-        set_byte_count[frozenset(file_set)] += length
-
-    counts = sorted(set_byte_count.items(), key=lambda x: x[1])
-
-    for file_set, length in counts:
-        fid_names = ' '.join(fid_to_name[fid] for fid in sorted(file_set)[:20])
-        print(f'{length:6x} bytes, {len(file_set):3} files {fid_names}')
-
-    return counts
+    return sorted(match_sets.values(), key=lambda ms: -ms.count_of_bytes)
 
 
 def search_file_in_hashdb(args):
@@ -412,23 +445,21 @@ def search_file_in_hashdb(args):
     search_file = args['SEARCH_FILE']
 
     print(f'Running search query')
-    file_counts, hash_counts, fid_set = run_search_query(hash_db_path, search_db_path, search_file, rebuild, block_size)
+    offset_counts = run_search_query(hash_db_path, search_db_path, search_file, rebuild, block_size)
+    cumulativeCounts = accumulate(offset_counts)
+    match_sets = match_set_analysis(cumulativeCounts)
 
-
-    print(f'Listing files')
     sql_db = sqlite3.connect(hash_db_path)
     fid_to_name = {file_id: name
                     for file_id, name in
                     rowgen2(sql_db, "SELECT file_id, name FROM FILES")}
 
-    display_fid_sets(fid_set, fid_to_name)
+    print(f'Lengths: {len(offset_counts)} {len(cumulativeCounts)} {len(match_sets)}')
 
-    match_set_counts = match_set_analysis(fid_set, fid_to_name)
 
     print(f'Initializing GUI')
     gui_view = gui.FileView(search_file)
-
-    gui_view.set_counts(file_counts, hash_counts, fid_set, fid_to_name, match_set_counts)
+    gui_view.set_counts(fid_to_name, cumulativeCounts, match_sets)
 
     print(f'Entering GUI event loop')
     gui_view.event_loop()
@@ -461,7 +492,7 @@ def ingest_files(hash_db_path, files_to_ingest, bs):
 
 
 usage = """
-REVeal SQL Database Tool
+REveal SQL Database Tool
 
 Usage:
     sql_db ingest HASH_DB FILES...

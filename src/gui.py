@@ -4,6 +4,7 @@ import sys
 import filehash
 
 import PySimpleGUI as sg
+import sql_db
 
 from intervaltree import Interval, IntervalTree
 
@@ -28,18 +29,15 @@ class FileView:
         self.hover_y = 0
         self.hover_line = None
 
-        self.file_counts = None
-        self.hash_counts = None
-        self.file_set_at_offset = None
+        #self.file_set_at_offset = None
+
+
+        self.cumulative_counts = None
+        self.fid_to_name = None
 
         self.init_graph()
 
-        self.file_count_intervals: IntervalTree | None = None
-        self.hash_count_intervals: IntervalTree | None = None
-
-        self.match_set_counts = None
-
-        self.file_intervals: IntervalTree | None = None
+        self.offset_count_intervals: IntervalTree | None = None
 
         self.file_x_start = 0
         self.file_x_end = len(self.contents)
@@ -85,7 +83,7 @@ class FileView:
         txt = self.window['-BYTES-']
 
         txt.update('')
-        txt.print(f'File Offset {file_offset:x}', font=('Fira Code', 12, 'bold'))
+        txt.print(f'File Offset {file_offset:x}  {file_offset//1024}KB', font=('Fira Code', 12, 'bold'))
         txt.print(f'Canvas Offset {self.hover_x}')
 
         if file_offset >= 0:
@@ -111,28 +109,22 @@ class FileView:
             txt.print('')
 
 
-        if self.file_count_intervals:
-            interval: set[Interval] = self.file_count_intervals.at(file_offset)
+        oc: sql_db.OffsetCount | None = None
+        if self.offset_count_intervals:
+            interval: set[Interval] = self.offset_count_intervals.at(file_offset)
             if interval:
-                file_count = sorted(interval)[0].data
-                txt.print(f'Matches {file_count} files by count')
+                oc = sorted(interval)[0].data
 
-        if self.hash_count_intervals:
-            interval: set[Interval] = self.hash_count_intervals.at(file_offset)
-            if interval:
-                hash_count = sorted(interval)[0].data
-                txt.print(f'Matches {hash_count} hashes by count')
+        if oc:
+            txt.print(f'Matches {oc.fileCount} files by count')
+            txt.print(f'Matches {oc.hashCount} hashes by count')
 
-
-        if self.file_intervals:
-            interval: set[Interval] = self.file_intervals.at(file_offset)
-            if interval:
-                file_set = sorted(interval)[0].data
-                if file_set:
-                    txt.print(f'Matches {len(file_set)} files', font=('Fira Code', 12, 'bold'))
-                # print(f'File_set = {file_set}')
-                fnames = [self.fid_to_name.get(fid, str(fid)) for fid in file_set]
+            fs = oc.get_frozen_set()
+            if fs:
+                txt.print(f'Matches {len(fs)} files', font=('Fira Code', 12, 'bold'))
+                fnames = [self.fid_to_name.get(fid, str(fid)) for fid in fs]
                 txt.print(' '.join(sorted(fnames)[:100]))
+
 
     def update_hover_line(self):
         if self.hover_line is not None:
@@ -158,43 +150,26 @@ class FileView:
         self.redraw_graph()
 
     def draw_file_sets(self):
-        if not self.file_counts:
+        if not self.cumulative_counts:
             return
 
-        # print(f'Lengths {len(self.file_counts)} {len(self.file_set_at_offset)}')
-        draw_just_counts = False
-        if draw_just_counts:
-            for current, next_count in itertools.pairwise(self.file_counts):
-                file_offset, match_count = current
-                next_offset, next_set = next_count
+        for oc in self.cumulative_counts:
+            oc: sql_db.OffsetCount
 
-                canvas_x1 = self.file_to_canvas_offset(file_offset)
-                canvas_x2 = self.file_to_canvas_offset(next_offset)
+            canvas_x1 = self.file_to_canvas_offset(oc.offset)
+            canvas_x2 = self.file_to_canvas_offset(oc.offset+oc.length)
 
-                height = my_log(match_count)
+            fs = oc.get_frozen_set()
 
-                self.graph.draw_rectangle((canvas_x1, height), (canvas_x2, 0), fill_color='green', line_width=0)
+            count = oc.get_count()
+            height = my_log(count)
 
-        else:
-            if not self.file_set_at_offset:
-                return
+            fill_color = self.match_set_colors.get(fs, 'green')
 
-            for current, next_set in itertools.pairwise(self.file_set_at_offset):
-                file_offset, file_set = current
-                next_offset, next_set = next_set
+            self.graph.draw_rectangle((canvas_x1, height), (canvas_x2, 0),
+                                      fill_color=self.match_set_colors.get(fs, 'green'),
+                                      line_width=0)
 
-                fs = frozenset(file_set)
-
-                canvas_x1 = self.file_to_canvas_offset(file_offset)
-                canvas_x2 = self.file_to_canvas_offset(next_offset)
-
-                #height = len(file_set)*2
-
-                height = my_log(len(file_set))
-
-                self.graph.draw_rectangle((canvas_x1, height), (canvas_x2, 0),
-                                          fill_color=self.match_set_colors.get(fs, 'green'),
-                                          line_width=0)
 
     def make_interval(self, offset_obj):
         it = IntervalTree()
@@ -205,53 +180,23 @@ class FileView:
             it[file_offset:next_offset] = current_obj
         return it
 
-    def set_counts(self, file_counts, hash_counts, file_set_at_offset, fid_name, match_set_counts):
-        self.file_counts = file_counts
-        self.hash_counts = hash_counts
-        self.file_set_at_offset = file_set_at_offset
-        self.fid_to_name = fid_name
-        self.match_set_counts = match_set_counts
-
-        class MatchSet:
-            def __init__(self, file_set, count_of_bytes):
-                self.file_set = frozenset(file_set)
-                self.count_of_bytes = count_of_bytes
-                self.color = None
-
-            def similarity(self, other):
-                return len(self.file_set & other.file_set) / len(self.file_set | other.file_set)
-
-        match_sets = [MatchSet(file_set, count_of_bytes) for file_set, count_of_bytes in match_set_counts]
-
-        colors = ['steel blue',
-                  'tan1',
-                  'yellow',
-                  'tomato',
-                  'turquoise',
-                  'violet',
-                  'dark red',
-                  'purple',
-                  'GreenYellow',
-                  'deep pink',
-                  'hot pink']
-
-        #self.match_set_colors = {
-        #    match_set[0]:color for color, match_set in zip(colors, reversed(match_set_counts))
-        #}
-
+    def assign_match_set_colors(self, match_sets):
         color_families = [
             [f'{base_color}{n}' for n in range(1,4)] for base_color in
             ['RoyalBlue', 'SkyBlue', 'LemonChiffon', 'Pink', 'tan', 'wheat',
              'orange', 'OrangeRed', 'VioletRed', 'SpringGreen', 'HotPink', 'Goldenrod']
         ]
 
-        sets_by_size = sorted(match_sets, key=lambda ms: -ms.count_of_bytes)
+        # match_sets = sorted(match_sets, key=lambda ms: -ms.count_of_bytes)
         current_set_index = 0
         for family in color_families:
             current_set = None
-            while not current_set or current_set.color:
-                current_set = sets_by_size[current_set_index]
-                current_set_index += 1
+            try:
+                while not current_set or current_set.color or not current_set.file_set:
+                    current_set = match_sets[current_set_index]
+                    current_set_index += 1
+            except IndexError as e:
+                break
 
             current_set.color = family[0]
 
@@ -268,14 +213,24 @@ class FileView:
             match_set.file_set : match_set.color for match_set in match_sets if match_set.color
         }
 
+    def set_counts(self,
+                   fid_name,
+                   cumulative_counts: dict[int, sql_db.OffsetCount],
+                   match_sets):
 
-        print(f'Match set colors: {self.match_set_colors}')
+        self.cumulative_counts = cumulative_counts
+        self.fid_to_name = fid_name
+
+        self.assign_match_set_colors(match_sets)
 
         self.draw_file_sets()
 
-        self.file_intervals = self.make_interval(self.file_set_at_offset)
-        self.file_count_intervals = self.make_interval(self.file_counts)
-        self.hash_count_intervals = self.make_interval(self.hash_counts)
+        self.offset_count_intervals = IntervalTree()
+        for oc in self.cumulative_counts:
+            if not oc.length:
+                continue
+            self.offset_count_intervals[oc.offset:oc.offset+oc.length] = oc
+
 
     def event_loop(self):
         self.adjust_sizes()
