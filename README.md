@@ -19,6 +19,7 @@ python -m pip install cbor2 pyelftools docopt pysimplegui intervaltree
 ## Create a Database
 
 Note: The custom CBOR-based database format is deprecated and is being replaced with a SQLite format.
+
 Note: The C++ version that works with the CBOR-based database is also being deprecated.
 
 
@@ -66,7 +67,8 @@ graphical interface to visualize the file matches.
 
 # Graphical Interface
 
-REveal now has a graphical interface to display matches.
+REveal now has a graphical interface to display matches.  With the `ls` binary compared to 900 Linux binaries, we can
+see how REveal can modularize parts of the binary based on match sets:
 
 ![REveal Sector Hashing GUI](img/REVeal_GUI.png)
 
