@@ -71,11 +71,17 @@ class Status:
 
     def _fmt_process(self, process_name):
         txt = self.process_txts.get(process_name, '')
-        return f'{self.getTimeDelta(process_name):5.2f} {txt.format(**self.vars)}'
+        self.vars['elapsed'] = self.getTimeDelta(process_name)
+
+        prefix = f'{self.getTimeDelta(process_name):5.2f}  '
+
+        # Either txt is a format string or a callback function
+        fx = txt.format if isinstance(txt, str) else txt
+
+        return f'{prefix}{fx(**self.vars)}'
 
     def getTimeDelta(self, process_name):
         return time.time() - self.start_times[process_name]
-
 
     def getOuterTimeDelta(self):
         return self.getTimeDelta(self.active_processes[0])

@@ -7,6 +7,8 @@ import time
 from collections import defaultdict
 from typing import Generator
 
+from util import status
+
 import docopt
 
 import gui
@@ -67,6 +69,13 @@ class SQLHashDB:
         ) WITHOUT ROWID
         ''',
         '''
+        CREATE TABLE "HASHFILES_INGEST" (
+            hash_id integer not null,
+            offset integer not null,
+            file_id integer not null
+        )
+        ''',
+        '''
         CREATE TABLE "FILES" (
             file_id INTEGER PRIMARY KEY not null,
             name TEXT,
@@ -93,6 +102,9 @@ class SQLHashDB:
     def __init__(self, path, delete_existing=True):
         self.path = path
         self.db_connection = init_db(path, SQLHashDB.tables, delete_existing)
+
+        self.total_hashes_added = 0
+        self.last_file_hashes = 0
 
     def close(self):
         self.db_connection.close()
@@ -132,7 +144,7 @@ class SQLHashDB:
         new_records = []
         n_records = 0
 
-        insert_query = """INSERT INTO HASHFILES
+        insert_query = """INSERT INTO HASHFILES_INGEST
             (hash_id, file_id, offset)
             VALUES (?, ?, ?)"""
 
@@ -148,6 +160,18 @@ class SQLHashDB:
         if new_records:
             self.db_connection.executemany(insert_query, sorted(new_records))
             self.db_connection.commit()
+            n_records += len(new_records)
+
+        self.total_hashes_added += n_records
+        self.last_file_hashes = n_records
+
+    def finalize_ingest(self):
+        self.db_connection.execute("""
+            INSERT INTO HASHFILES (hash_id, offset, file_id)
+            SELECT SRC.hash_id, SRC.offset, SRC.file_id
+            FROM HASHFILES_INGEST AS SRC;
+        """)
+        self.db_connection.execute("DELETE FROM HASHFILES_INGEST")
 
     def convert_nsrl_hashfiles(self,
                                input_db: sqlite3.Connection):
@@ -477,17 +501,38 @@ def expand_paths(paths):
         else:
             yield path
 
+def format_ingest(n_files, n_hashes, elapsed, path, **kwargs):
+    return f'{n_files:5} files, {n_hashes:8} hashes, {n_hashes / (elapsed or 1):5.0f} hash/s'
 
 def ingest_files(hash_db_path, files_to_ingest, bs):
     hash_db = SQLHashDB(hash_db_path, False)
+    n_files = 0
+
+
+    status.start_process('Ingesting', format_ingest,
+                         n_files=0, n_hashes=0, path='')
     for path in expand_paths(files_to_ingest):
-        print(f"Ingesting {path}")
+        n_files += 1
+        status.update('Ingesting', n_files=n_files, n_hashes=hash_db.total_hashes_added)
+
+
+        status.start_process('IngestFile', 'File: {n_file_hashes:7} hashes {path}', path=path, n_file_hashes=0)
         hf = HashedFile(path)
         fid = hash_db.add_file(path, hf.getWholeFileHash())
-
         sector_gen = hf.genAlignedBlocks(bs=bs)
-
         hash_db.add_hash_blocks(fid, sector_gen)
+        status.finish_process('IngestFile', n_file_hashes=hash_db.last_file_hashes)
+
+    status.finish_process('Ingesting', n_files=n_files, n_hashes=hash_db.total_hashes_added)
+
+
+
+    status.start_process('FinalizingIngest', 'Finalizing ingest by sorting into final table')
+    hash_db.finalize_ingest()
+    status.finish_process('FinalizingIngest')
+
+
+
     hash_db.populate_hashcount()
 
 
