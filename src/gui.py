@@ -9,160 +9,49 @@ import sql_db
 from intervaltree import Interval, IntervalTree
 
 
-def my_log(x: int, max_value = 1000, pixel_height=200) -> int:
-    #if x == 0:
-    #    return x
-    #result = 0
-
+def my_log(x: int, max_value=1000, pixel_height=200) -> int:
     return int(math.log(x+1)/math.log(max_value)*pixel_height)
 
-class FileView:
+class MatchHistogram:
+    """
+    MatchHistogram represents match counts and match sets for a search of a particular file against a single
+    database.  In the future, this may support drawing the match scales for multiple databases (e.g. if you
+    search both a known-good database vs. a known-malware database).
 
-    def __init__(self, path):
-        self.path = path
-        with open(path, 'rb') as fd:
-            self.contents = fd.read()
+    This class is responsible for drawing the log-scale match count graph and colorizing the largest match sets.
+    """
 
-        self.zeroized_file = filehash.MemFile(path, True).data
+    def __init__(self,
+                 fid_name,
+                 cumulative_counts: list[sql_db.OffsetCount],
+                 match_sets):
 
-        self.hover_x = 0
-        self.hover_y = 0
-        self.hover_line = None
+        self.cumulative_counts = cumulative_counts
+        self.fid_to_name = fid_name
 
-        #self.file_set_at_offset = None
+        self.assign_match_set_colors(match_sets)
 
-        self.cumulative_counts = None
-        self.fid_to_name = None
+        #self.draw_file_sets()
 
+        self.offset_count_intervals = IntervalTree()
+        for oc in self.cumulative_counts:
+            if not oc.length:
+                continue
+            self.offset_count_intervals[oc.offset:oc.offset+oc.length] = oc
 
-        screenWidth, screenHeight = sg.Window.get_screen_size()
-        self.canvas_width = screenWidth * 80 // 100
-        self.canvas_coord_width = 10000
-
-        canvas_size = (self.canvas_width, 300)
-        graph_obj = sg.Graph(canvas_size, (0,0), (self.canvas_coord_width, 300), background_color='grey', key='graph')
-        layout = [
-            [graph_obj],
-            [sg.MLine("Bottom text",
-                      size=(100, 20),
-                      font=('Fira Code', 12),
-                      background_color='grey',
-                      text_color='white',
-                      no_scrollbar=True,
-                      key='-BYTES-')]
-        ]
-
-        self.window = sg.Window(f'Sector Hash {self.path}',
-                                layout,
-                                location=(screenWidth*1//10, screenHeight*1/10),
-                                finalize=True,
-                                resizable=True,
-                                background_color='light grey')
-        self.window.refresh()
-        self.graph = self.window['graph']
-        self.text_data_display = self.window['-BYTES-']
-
-        self.offset_count_intervals: IntervalTree | None = None
-
-        self.file_x_start = 0
-        self.file_x_end = len(self.contents)
-
-        self.drag_start_x = None
-        self.drag_start_x_file = None
-
-    def canvas_to_file_offset(self, x: int) -> int:
-        file_view_width = self.file_x_end - self.file_x_start
-
-        return ((x or 0) * file_view_width // self.canvas_coord_width) + self.file_x_start
-
-    def file_to_canvas_offset(self, file_offset: int) -> int:
-        file_view_width = self.file_x_end - self.file_x_start
-        return (file_offset - self.file_x_start) * self.canvas_coord_width // file_view_width
-
-    def update_text(self):
-        if self.hover_x is None:
-            return
-
-        file_offset = self.canvas_to_file_offset(self.hover_x)
-
-        txt = self.window['-BYTES-']
-
-        txt.update('')
-        txt.print(f'File Offset {file_offset:x}  {file_offset//1024}KB', font=('Fira Code', 12, 'bold'))
-        txt.print(f'Canvas Offset {self.hover_x}')
-
-        if file_offset >= 0:
-            file_bytes = self.contents[file_offset:file_offset + 128]
-            byte_columns = 32
-            byte_separator = 8
-            for offset in range(0, len(file_bytes)):
-                full_offset = file_offset+offset
-                if offset % byte_columns == 0:
-                    if offset:
-                        txt.print('')
-                    txt.print(f'{full_offset:6x}: ', end='')
-                if full_offset % byte_separator == 0:
-                    txt.print(' ', end='')
-
-                hex_bytes = self.contents[full_offset:full_offset+1].hex()
-                z_bytes = self.zeroized_file[full_offset:full_offset+1].hex()
-                if hex_bytes == z_bytes:
-                    txt.print(hex_bytes, end='', text_color='black', font = ('Fira Code', 12))
-                else:
-                    txt.print(hex_bytes, end='', text_color='grey24', font = ('Fira Code', 12, 'underline'))
-
-            txt.print('')
-
-
-        oc: sql_db.OffsetCount | None = None
+    def get_offset_count(self, file_offset) -> sql_db.OffsetCount | None:
         if self.offset_count_intervals:
             interval: set[Interval] = self.offset_count_intervals.at(file_offset)
             if interval:
-                oc = sorted(interval)[0].data
+                return sorted(interval)[0].data
 
-        if oc:
-            txt.print(f'Matches {oc.fileCount} files by count')
-            txt.print(f'Matches {oc.hashCount} hashes by count')
-
-            fs = oc.get_frozen_set()
-            if fs:
-                txt.print(f'Matches {len(fs)} files', font=('Fira Code', 12, 'bold'))
-                fnames = [self.fid_to_name.get(fid, str(fid)) for fid in fs]
-                txt.print(' '.join(sorted(fnames)[:100]))
-
-
-    def update_hover_line(self):
-        if self.hover_line is not None:
-            self.graph.delete_figure(self.hover_line)
-
-        # Do the conversion to snap to an offset
-        x = self.file_to_canvas_offset(self.canvas_to_file_offset(self.hover_x))
-
-        self.hover_line = self.graph.draw_line((x, 0), (x, 300), color='white')
-
-    def redraw_graph(self):
-        self.graph.erase()
-        self.update_hover_line()
-        self.draw_file_sets()
-
-    def adjust_sizes(self):
-        print(f'Window size {self.window.size}  {self.window.get_screen_size()}')
-
-        self.canvas_width = self.window.size[0]-30
-        self.graph.set_size((self.canvas_width, 300))
-        self.text_data_display.set_size((self.canvas_width//10, 30))
-
-        self.redraw_graph()
-
-    def draw_file_sets(self):
+    def draw_file_sets(self, graph: sg.Graph, file_to_canvas_offset):
         if not self.cumulative_counts:
             return
 
         for oc in self.cumulative_counts:
-            oc: sql_db.OffsetCount
-
-            canvas_x1 = self.file_to_canvas_offset(oc.offset)
-            canvas_x2 = self.file_to_canvas_offset(oc.offset+oc.length)
+            canvas_x1 = file_to_canvas_offset(oc.offset)
+            canvas_x2 = file_to_canvas_offset(oc.offset+oc.length)
 
             fs = oc.get_frozen_set()
 
@@ -171,19 +60,9 @@ class FileView:
 
             fill_color = self.match_set_colors.get(fs, 'green')
 
-            self.graph.draw_rectangle((canvas_x1, height), (canvas_x2, 0),
+            graph.draw_rectangle((canvas_x1, height), (canvas_x2, 0),
                                       fill_color=self.match_set_colors.get(fs, 'green'),
                                       line_width=0)
-
-
-    def make_interval(self, offset_obj):
-        it = IntervalTree()
-        for current, next_obj in itertools.pairwise(offset_obj):
-            file_offset, current_obj = current
-            next_offset, next_obj = next_obj
-
-            it[file_offset:next_offset] = current_obj
-        return it
 
     def assign_match_set_colors(self, match_sets):
         color_families = [
@@ -218,23 +97,93 @@ class FileView:
             match_set.file_set : match_set.color for match_set in match_sets if match_set.color
         }
 
+
+class FileView:
+    """
+    A FileView class is responsible for drawing information about a single file.  This may include:
+
+    1. A MatchHistogram.  In the future, we may support multiple.
+    2. The raw bytes of the file, as well as the zero-ized version of the file.
+    3. Known ranges/intervals, as parsed an input by analysis tools.
+    """
+    def __init__(self, path, graph_name):
+        self.path = path
+        self.graph_name = graph_name
+
+        with open(path, 'rb') as fd:
+            self.contents = fd.read()
+
+        self.zeroized_file = filehash.MemFile(path, True).data
+
+        # self.values is updated when GUIView reads the event loop
+        self.values = {self.graph_name: (0, 0)}
+        self.hover_x = 0
+        self.hover_y = 0
+        self.hover_line = None
+
+        width, height = sg.Window.get_screen_size()
+        self.canvas_coord_width = 10000
+
+        initial_canvas_size = (width * 80 // 100, 300)
+        self.graph = sg.Graph(initial_canvas_size, (0,0), (self.canvas_coord_width, 300), background_color='grey', key=graph_name)
+
+        self.file_x_start = 0
+        self.file_x_end = len(self.contents)
+
+        self.drag_start_x = None
+        self.drag_start_x_file = None
+
+        self.match_histogram: MatchHistogram | None = None
+
+        '''
+        # Stores the sql_db.OffsetCount data for each file offset
+        self.offset_count_intervals: IntervalTree | None = None
+        self.cumulative_counts: list[sql_db.OffsetCount] | None = None
+        self.fid_to_name: dict[int, str] | None = None
+        self.match_set_colors: dict[frozenset[int], str] = {}
+        '''
+
+
+    def canvas_to_file_offset(self, x: int) -> int:
+        file_view_width = self.file_x_end - self.file_x_start
+
+        return ((x or 0) * file_view_width // self.canvas_coord_width) + self.file_x_start
+
+    def file_to_canvas_offset(self, file_offset: int) -> int:
+        file_view_width = self.file_x_end - self.file_x_start
+        return (file_offset - self.file_x_start) * self.canvas_coord_width // file_view_width
+
+
+    def get_hover_file_offset(self):
+        if self.hover_x is None:
+            return None
+        return self.canvas_to_file_offset(self.hover_x)
+
+    def update_hover_line(self):
+        if self.hover_line is not None:
+            self.graph.delete_figure(self.hover_line)
+
+        # Do the conversion to snap to an offset
+        x = self.file_to_canvas_offset(self.canvas_to_file_offset(self.hover_x))
+
+        self.hover_line = self.graph.draw_line((x, 0), (x, 300), color='white')
+
+    def redraw_graph(self):
+        self.graph.erase()
+        self.update_hover_line()
+        if self.match_histogram:
+            self.match_histogram.draw_file_sets(self.graph, self.file_to_canvas_offset)
+
+    def adjust_sizes(self, width, height):
+        self.graph.set_size((width, height))
+        self.redraw_graph()
+
     def set_counts(self,
                    fid_name,
-                   cumulative_counts: dict[int, sql_db.OffsetCount],
+                   cumulative_counts: list[sql_db.OffsetCount],
                    match_sets):
 
-        self.cumulative_counts = cumulative_counts
-        self.fid_to_name = fid_name
-
-        self.assign_match_set_colors(match_sets)
-
-        self.draw_file_sets()
-
-        self.offset_count_intervals = IntervalTree()
-        for oc in self.cumulative_counts:
-            if not oc.length:
-                continue
-            self.offset_count_intervals[oc.offset:oc.offset+oc.length] = oc
+        self.match_histogram = MatchHistogram(fid_name, cumulative_counts, match_sets)
 
     def handle_mouse_wheel(self):
         # print(f"Mouse {self.graph.user_bind_event.delta}")
@@ -247,7 +196,7 @@ class FileView:
 
         else:
             # Zoom in
-            file_hover_x = self.canvas_to_file_offset(self.hover_x)
+            file_hover_x = self.get_hover_file_offset()
             left = file_hover_x - self.file_x_start
             right = self.file_x_end - file_hover_x
             self.file_x_start += left // 5
@@ -263,48 +212,156 @@ class FileView:
 
         self.redraw_graph()
 
+    def update_hover(self):
+        self.hover_x, self.hover_y = self.values[self.graph_name]
+
+    def action_click(self):
+        x, y = self.values[self.graph_name]
+        self.drag_start_x = x
+        self.drag_start_x_file = self.canvas_to_file_offset(self.drag_start_x)
+
+    def action_drag(self):
+        x, y = self.values[self.graph_name]
+        file_x = self.canvas_to_file_offset(x)
+        delta_x = self.drag_start_x_file - file_x
+
+        self.hover_x = x
+        self.file_x_start += delta_x
+        self.file_x_end += delta_x
+
+        self.redraw_graph()
+
+    def get_events(self):
+        return [
+            (self.graph, '<Motion>',     self.update_hover),
+            (self.graph, '<MouseWheel>', self.handle_mouse_wheel),
+            (self.graph, '<Button-1>',   self.action_click),
+            (self.graph, '<B1-Motion>',  self.action_drag),
+        ]
+
+
+class GUIView:
+    """
+    GUIView is a high-level representation of the REveal graphical interface.  It renders a window with a top FileView
+    object and a bottom text box.
+    """
+
+    def __init__(self, file_path):
+        self.view1 = FileView(file_path, 'view1')
+
+
+        self.bottom_text = sg.MLine("Bottom text",
+                      size=(100, 20),
+                      font=('Fira Code', 12),
+                      background_color='grey',
+                      text_color='white',
+                      no_scrollbar=True,
+                      key='-BYTES-')
+        layout = [
+            [self.view1.graph],
+            [self.bottom_text]
+        ]
+
+        screenWidth, screenHeight = sg.Window.get_screen_size()
+        self.window = sg.Window(f'Sector Hash {file_path}',
+                                layout,
+                                location=(screenWidth*1//10, screenHeight*1//10),
+                                finalize=True,
+                                resizable=True,
+                                background_color='light grey')
+        self.window.refresh()
+
+
+    def set_counts(self,
+                   fid_name,
+                   cumulative_counts: dict[int, sql_db.OffsetCount],
+                   match_sets):
+        self.view1.set_counts(fid_name, cumulative_counts, match_sets)
+
+    def adjust_sizes(self):
+        window_inner_width = self.window.size[0] - 30
+        self.view1.adjust_sizes(window_inner_width, 300)
+
+        self.bottom_text.set_size((window_inner_width//10, 30))
+
+
+    def update_text(self, txt: sg.MLine, view: FileView):
+        file_offset = view.get_hover_file_offset()
+        if file_offset is None:
+            return
+
+        txt.update('')
+        txt.print(f'File Offset {file_offset:x}  {file_offset//1024}KB', font=('Fira Code', 12, 'bold'))
+
+        if file_offset >= 0:
+            file_bytes = view.contents[file_offset:file_offset + 128]
+            byte_columns = 32
+            byte_separator = 8
+            for offset in range(0, len(file_bytes)):
+                full_offset = file_offset+offset
+                if offset % byte_columns == 0:
+                    if offset:
+                        txt.print('')
+                    txt.print(f'{full_offset:6x}: ', end='')
+                if full_offset % byte_separator == 0:
+                    txt.print(' ', end='')
+
+                hex_bytes = view.contents[full_offset:full_offset+1].hex()
+                z_bytes = view.zeroized_file[full_offset:full_offset+1].hex()
+                if hex_bytes == z_bytes:
+                    txt.print(hex_bytes, end='', text_color='black', font = ('Fira Code', 12))
+                else:
+                    txt.print(hex_bytes, end='', text_color='grey24', font = ('Fira Code', 12, 'underline'))
+
+            txt.print('')
+
+        oc = view.match_histogram.get_offset_count(file_offset) if view.match_histogram else None
+
+        if oc:
+            txt.print(f'Matches {oc.fileCount} files by count')
+            txt.print(f'Matches {oc.hashCount} hashes by count')
+
+            fs = oc.get_frozen_set()
+            if fs:
+                txt.print(f'Matches {len(fs)} files', font=('Fira Code', 12, 'bold'))
+                fnames = [view.match_histogram.fid_to_name.get(fid, str(fid)) for fid in fs]
+                txt.print(' '.join(sorted(fnames)[:100]))
+
+
     def event_loop(self):
         self.adjust_sizes()
 
         self.window.bind("<Configure>", "+RESIZE+")
-        self.graph.bind('<Motion>', '+MOTION+')
-        self.graph.bind('<MouseWheel>', '+MOUSEWHEEL+')
 
-        self.graph.bind('<Button-1>', '+CLICK+')
-        self.graph.bind('<B1-Motion>', '+DRAG+')
+        event_actions = {}
+        for event_obj, event_name, event_fx in self.view1.get_events():
+            event_name2 = event_name.replace('<', '+').replace('>', '+')
+
+            event_obj.bind(event_name, event_name2)
+            event_actions[event_obj.key + event_name2] = event_fx
 
         while True:
             event, values = self.window.read()
             if event in ('Quit', None):  # always give ths user a way out
                 break
 
+            if event.startswith(self.view1.graph_name):
+                self.view1.values = values
             # print(f'Event={event}, values = {values}')
-
-            self.hover_x, self.hover_y = values['graph']
 
             if 'RESIZE' in event:
                 self.adjust_sizes()
-            if 'MOUSEWHEEL' in event:
-                self.handle_mouse_wheel()
-            if 'CLICK' in event:
-                self.drag_start_x = self.hover_x
-                self.drag_start_x_file = self.canvas_to_file_offset(self.drag_start_x)
-            if 'DRAG' in event:
-                file_x = self.canvas_to_file_offset(self.hover_x)
-                delta_x = self.drag_start_x_file - file_x
 
-                self.file_x_start += delta_x
-                self.file_x_end += delta_x
+            action = event_actions.get(event, None)
+            if action:
+                action()
 
-                self.redraw_graph()
-
-            self.update_text()
-            self.update_hover_line()
-
+            self.update_text(self.bottom_text, self.view1)
+            self.view1.update_hover_line()
 
         self.window.close()
 
 
 if __name__ == "__main__":
-    file = FileView(sys.argv[1])
+    file = FileView(sys.argv[1], 'the_graph')
     file.event_loop()

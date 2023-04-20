@@ -482,7 +482,7 @@ def search_file_in_hashdb(args):
 
 
     print(f'Initializing GUI')
-    gui_view = gui.FileView(search_file)
+    gui_view = gui.GUIView(search_file)
     gui_view.set_counts(fid_to_name, cumulativeCounts, match_sets)
 
     print(f'Entering GUI event loop')
