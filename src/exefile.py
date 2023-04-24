@@ -1,7 +1,6 @@
 
 import struct
-
-
+from intervaltree import IntervalTree
 
 
 
@@ -24,23 +23,33 @@ class Thunk:
         self.a_name = a_name
         self.b_name = b_name
 
+        self.forward = IntervalTree()
+        self.backward = IntervalTree()
+
         self.map = []
 
     def add(self, a_range, b_range, meta):
-        self.map.append((a_range, b_range, meta))
+        a, a_len = a_range
+        b, b_len = b_range
 
+        if a_len:
+            self.forward[a:a+a_len] = (b, b_len, meta)
+        if b_len:
+            self.backward[b:b+b_len] = (a, a_len, meta)
 
     def all_in_range(self, address):
-        for a_range, b_range, meta in self.map:
-            a_lo, a_len = a_range
-            if a_lo <= address < a_lo + a_len:
-                yield a_range, b_range, meta
+        for interval in self.forward.at(address):
+            a_range = (interval.begin, interval.length())
+            b, b_len, meta = interval.data
+            b_range = (b, b_len)
+            yield a_range, b_range, meta
 
     def all_in_range_reverse(self, address):
-        for a_range, b_range, meta in self.map:
-            b_lo, b_len = b_range
-            if b_lo <= address < b_lo + b_len:
-                yield a_range, b_range, meta
+        for interval in self.forward.at(address):
+            b_range = (interval.begin, interval.length())
+            a, a_len, meta = interval.data
+            a_range = (a, a_len)
+            yield a_range, b_range, meta
 
     def translate(self, address):
         for a_range, b_range, meta in self.all_in_range(address):
@@ -56,12 +65,19 @@ class Thunk:
                 return new_off, meta
         return None, None
 
+    def all(self):
+        for interval in self.forward.all_intervals:
+            a_range = (interval.begin, interval.length())
+            b, b_len, meta = interval.data
+            b_range = (b, b_len)
+            yield a_range, b_range, meta
 
 
 class ELFThunks:
     def __init__(self, path):
         self.file_to_va_thunk = None
         self.thunks = []
+        self.structs = []
 
         from elftools.elf.elffile import ELFFile
         from elftools.common.exceptions import ELFError
@@ -94,7 +110,6 @@ class ELFThunks:
 
                 meta = dict(name = sect.name or sh_type, struct = dict(sect.header))
                 self.segment_thunk.add((sh_offset,file_size), (sh_addr,mem_size), meta)
-
 
                 #print(f'Section {sect.name:20} {flag_txt} {sh_offset:6x}+{file_size:<6x}  {sh_addr:6x}+{mem_size:<6x} {sect.header}')
 

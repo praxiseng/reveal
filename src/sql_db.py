@@ -568,6 +568,5 @@ def main():
         search_file_in_hashdb(args)
 
 
-
 if __name__ == "__main__":
     main()
