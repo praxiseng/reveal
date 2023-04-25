@@ -1,3 +1,4 @@
+import glob
 import itertools
 import sqlite3
 import os
@@ -459,6 +460,13 @@ def match_set_analysis(cumulative_counts: list[OffsetCount]) -> list[MatchSet]:
     return sorted(match_sets.values(), key=lambda ms: -ms.count_of_bytes)
 
 
+class FileRecord:
+    def __init__(self, fid, name, path):
+        self.fid = fid
+        self.name = name
+        self.path = path
+
+
 def search_file_in_hashdb(args):
     block_size = int(args['--blocksize'])
 
@@ -474,53 +482,78 @@ def search_file_in_hashdb(args):
     match_sets = match_set_analysis(cumulativeCounts)
 
     sql_db = sqlite3.connect(hash_db_path)
-    fid_to_name = {file_id: name
-                    for file_id, name in
-                    rowgen2(sql_db, "SELECT file_id, name FROM FILES")}
+    fid_to_name = {file_id: FileRecord(file_id, name, path)
+                   for file_id, name, path in
+                   rowgen2(sql_db, "SELECT file_id, name, path FROM FILES")}
+
+    def fid_lookup(fid: int) -> FileRecord:
+        return fid_to_name[fid]
 
     print(f'Lengths: {len(offset_counts)} {len(cumulativeCounts)} {len(match_sets)}')
 
-
     print(f'Initializing GUI')
     gui_view = gui.GUIView(search_file)
-    gui_view.set_counts(fid_to_name, cumulativeCounts, match_sets)
+    gui_view.set_counts(fid_lookup, cumulativeCounts, match_sets)
 
     print(f'Entering GUI event loop')
     gui_view.event_loop()
 
 
-def expand_paths(paths):
+def expand_paths(paths, use_globs = False):
     if isinstance(paths, (str, bytes)):
         paths = [paths]
 
-    for path in paths:
-        if os.path.isdir(path):
-            for root, dirs, files in os.walk(path):
-                for file in files:
-                    yield os.path.join(root, file)
-        else:
-            yield path
+    if use_globs:
+        for glob_expression in paths:
+            for path in glob.glob(glob_expression, recursive=True):
+                yield path
+    else:
+        for path in paths:
+            if os.path.isdir(path):
+                for root, dirs, files in os.walk(path):
+                    for file in files:
+                        yield os.path.join(root, file)
+            else:
+                yield path
+
 
 def format_ingest(n_files, n_hashes, elapsed, path, **kwargs):
     return f'{n_files:5} files, {n_hashes:8} hashes, {n_hashes / (elapsed or 1):5.0f} hash/s'
 
-def ingest_files(hash_db_path, files_to_ingest, bs):
+
+def is_exe_by_header(path):
+    with open(path, 'rb') as fd:
+        signature = fd.read(4)
+        if signature == b'\x7fELF':
+            return True
+        if signature[:2] == b'MZ':
+            return True
+    return False
+
+def ingest_files(hash_db_path, files_to_ingest, bs, only_exe, use_glob):
     hash_db = SQLHashDB(hash_db_path, False)
     n_files = 0
 
 
     status.start_process('Ingesting', format_ingest,
                          n_files=0, n_hashes=0, path='')
-    for path in expand_paths(files_to_ingest):
-        n_files += 1
+    for path in expand_paths(files_to_ingest, use_glob):
         status.update('Ingesting', n_files=n_files, n_hashes=hash_db.total_hashes_added)
 
+        if only_exe:
+            is_exe = is_exe_by_header(path)
+            if not is_exe:
+                continue
 
+        n_files += 1
         status.start_process('IngestFile', 'File: {n_file_hashes:7} hashes {path}', path=path, n_file_hashes=0)
-        hf = HashedFile(path)
-        fid = hash_db.add_file(path, hf.getWholeFileHash())
-        sector_gen = hf.genAlignedBlocks(bs=bs)
-        hash_db.add_hash_blocks(fid, sector_gen)
+        try:
+            hf = HashedFile(path)
+            fid = hash_db.add_file(path, hf.getWholeFileHash())
+            sector_gen = hf.genAlignedBlocks(bs=bs)
+            hash_db.add_hash_blocks(fid, sector_gen)
+        except PermissionError as e:
+            print(f'Permission error {e}')
         status.finish_process('IngestFile', n_file_hashes=hash_db.last_file_hashes)
 
     status.finish_process('Ingesting', n_files=n_files, n_hashes=hash_db.total_hashes_added)
@@ -540,7 +573,7 @@ usage = """
 REveal SQL Database Tool
 
 Usage:
-    sql_db ingest HASH_DB FILES...
+    sql_db ingest HASH_DB FILES... [options]
     sql_db import HASH_DB NSRL_DB [options]
     sql_db search HASH_DB SEARCH_DB SEARCH_FILE [options]
 
@@ -549,6 +582,8 @@ Options:
                       This includes the HASH_DB when using "import" and the cached search
                       database when using "search"
     --blocksize BS    Sector block size [default: 128]
+    --exe             Only process executable files (PE or ELF) for ingest
+    --glob            Use globbing on the list of files for ingest
 """
 
 
@@ -559,7 +594,7 @@ def main():
     hash_db_path = args['HASH_DB']
 
     if args['ingest']:
-        ingest_files(args['HASH_DB'], args['FILES'], int(args['--blocksize']))
+        ingest_files(args['HASH_DB'], args['FILES'], int(args['--blocksize']), args['--exe'], args['--glob'])
 
     if args['import']:
         import_nsrl_db(args['HASH_DB'], args['NSRL_DB'], args['--rebuild'])

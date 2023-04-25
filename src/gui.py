@@ -12,7 +12,10 @@ import sql_db
 from intervaltree import Interval, IntervalTree
 
 from exefile import ELFThunks
+import entropy
 
+font_name = 'Fira Code'
+font_size = 12
 
 def my_log(x: int, max_value=1000, pixel_height=200) -> int:
     return int(math.log(x + 1) / math.log(max_value) * pixel_height)
@@ -28,12 +31,12 @@ class MatchHistogram:
     """
 
     def __init__(self,
-                 fid_name,
+                 fid_lookup,
                  cumulative_counts: list[sql_db.OffsetCount],
                  match_sets):
 
         self.cumulative_counts = cumulative_counts
-        self.fid_to_name = fid_name
+        self.fid_lookup = fid_lookup
 
         self.match_set_colors = self.determine_match_set_colors(match_sets)
 
@@ -148,14 +151,14 @@ class FileView:
         self.match_histogram: MatchHistogram | None = None
 
         self.label_intervals = [(0, len(self.contents), f'File {path}')]
-        for thunk in [self.elf_thunks.section_thunk, self.elf_thunks.segment_thunk]:
+        for thunk in self.elf_thunks.thunks:
             for a_range, b_range, meta in sorted(thunk.all(), key=lambda x:x[0]):
                 a_begin, a_len = a_range
                 a_end = a_begin + a_len
 
                 self.label_intervals.append((a_begin, a_len, meta['name']))
 
-        self.histogram_y = self.canvas_coord_height - 300
+        self.histogram_y = self.canvas_coord_height - 350
 
     def draw_interval(self, y, file_begin, file_end, txt):
         x1 = self.file_to_canvas_offset(file_begin)
@@ -165,7 +168,9 @@ class FileView:
         self.graph.draw_line((x1, y-height), (x1, y), width=3)
         self.graph.draw_line((x1, y), (x2, y), width=3)
         self.graph.draw_line((x2, y-height), (x2, y), width=3)
-        self.graph.draw_text(txt, ((x1+x2)//2, y-30), font=(10,))
+
+        if x2 - x1 > 50:
+            self.graph.draw_text(txt, ((x1+x2)//2, y-30), font=(10,))
 
     def draw_intervals(self):
         level_maximums = [0]*9
@@ -209,7 +214,7 @@ class FileView:
         self.update_hover_line()
         if self.match_histogram:
             y_offset = self.histogram_y
-            self.match_histogram.draw_file_sets(self.graph, self.file_to_canvas_offset, y_offset, 200)
+            self.match_histogram.draw_file_sets(self.graph, self.file_to_canvas_offset, y_offset, 300)
         self.draw_intervals()
 
     def adjust_sizes(self, width, height):
@@ -217,11 +222,11 @@ class FileView:
         self.redraw_graph()
 
     def set_counts(self,
-                   fid_name,
+                   fid_lookup,
                    cumulative_counts: list[sql_db.OffsetCount],
                    match_sets):
 
-        self.match_histogram = MatchHistogram(fid_name, cumulative_counts, match_sets)
+        self.match_histogram = MatchHistogram(fid_lookup, cumulative_counts, match_sets)
 
     def handle_mouse_wheel(self):
         # print(f"Mouse {self.graph.user_bind_event.delta}")
@@ -287,17 +292,20 @@ class GUIView:
     def __init__(self, file_path):
         self.view1 = FileView(file_path, 'view1')
 
+        screen_width, screen_height = sg.Window.get_screen_size()
+
+
         self.bottom_text = sg.MLine("Bottom text",
-                                    size=(100, 20),
-                                    font=('Fira Code', 12),
+                                    size=(100, 30),
+                                    font=(font_name, font_size),
                                     background_color='grey',
                                     text_color='white',
                                     no_scrollbar=True,
                                     key='-BYTES-')
 
         self.bottom_text2 = sg.MLine("Bottom text",
-                                     size=(100, 20),
-                                     font=('Fira Code', 12),
+                                     size=(100, 30),
+                                     font=(font_name, font_size),
                                      background_color='grey',
                                      text_color='white',
                                      no_scrollbar=True,
@@ -308,7 +316,6 @@ class GUIView:
             [self.bottom_text, self.bottom_text2]
         ]
 
-        screen_width, screen_height = sg.Window.get_screen_size()
         self.window = sg.Window(f'Sector Hash {file_path}',
                                 layout,
                                 location=(screen_width * 1 // 10, screen_height * 1 // 10),
@@ -318,23 +325,41 @@ class GUIView:
         self.window.refresh()
 
     def set_counts(self,
-                   fid_name,
+                   fid_lookup,
                    cumulative_counts: list[sql_db.OffsetCount],
                    match_sets):
-        self.view1.set_counts(fid_name, cumulative_counts, match_sets)
+        self.view1.set_counts(fid_lookup, cumulative_counts, match_sets)
 
     def adjust_sizes(self):
         window_inner_width = self.window.size[0] - 30
+        window_inner_height = self.window.size[1] - 30
         self.view1.adjust_sizes(window_inner_width, 300)
 
         txt_width = window_inner_width // 10 // 2
 
-        self.bottom_text.set_size((txt_width, 30))
-        self.bottom_text2.set_size((txt_width, 30))
+        canvas_width, canvas_height = self.view1.graph.get_size()
+
+        screen_width, screen_height = sg.Window.get_screen_size()
+
+        #txt_lines = (window_inner_height - canvas_height)//20
+        txt_lines = (screen_height * 8 // 10 - canvas_height)//20
+        txt_lines = max(txt_lines, 4)
+        # print(f'lines = {window_inner_height} {self.view1.canvas_coord_height} {self.view1.graph.get_size()} {txt_width} {txt_lines}')
+
+        txt_size = (txt_width, txt_lines)
+
+        self.bottom_text.Size = txt_size
+        self.bottom_text.set_size(txt_size)
+
+        self.bottom_text2.Size = txt_size
+        self.bottom_text2.set_size((txt_width, txt_lines))
 
     def add_matches(self, txt: sg.MLine, view: FileView, file_offset):
-        file_offset = view.get_hover_file_offset()
         oc = view.match_histogram.get_offset_count(file_offset) if view.match_histogram else None
+
+        txt_width, txt_height = txt.Size
+
+        max_lines = 500
 
         if oc:
             txt.print(f'Matches {oc.fileCount} files by count')
@@ -342,23 +367,63 @@ class GUIView:
 
             fs = oc.get_frozen_set()
             if fs:
-                txt.print(f'Matches {len(fs)} files', font=('Fira Code', 12, 'bold'))
-                fnames = [view.match_histogram.fid_to_name.get(fid, str(fid)) for fid in fs]
-                txt.print(' '.join(sorted(fnames)[:100]))
+                txt.print(f'Matches {len(fs)} files', font=(font_name, font_size, 'bold'))
+                files = [view.match_histogram.fid_lookup(fid) for fid in fs]
+                files = [f for f in files if f]
+                files: list[sql_db.FileRecord]
+
+                if len(files) > max_lines:
+                    fnames = [file.name for file in files]
+                    txt.print(' '.join(sorted(fnames)[:50]), font=(font_name, font_size-1))
+                else:
+                    paths = [file.path for file in files]
+                    for path in sorted(paths):
+                        txt.print(f'{path}', font=(font_name, font_size-1))
+
+    def add_entropy(self, txt: sg.MLine, file_bytes: bytes):
+        entropies = []
+
+        if not file_bytes:
+            return
+
+        entropies.append(('Byte', entropy.entropy(file_bytes)))
+
+        if len(file_bytes) % 8 == 0:
+            entropies.append(('Word', entropy.word_entropy(file_bytes)))
+            entropies.append(('Dword', entropy.dword_entropy(file_bytes)))
+            entropies.append(('Qword', entropy.qword_entropy(file_bytes)))
+
+        entropies.append(('NibLo', entropy.nib_entropy_lo(file_bytes)))
+        entropies.append(('NibHi', entropy.nib_entropy_hi(file_bytes)))
+
+        value = '  '.join(f'{name} {value:5.3f}' for name, value in entropies)
+        txt.print(f'Entropy {value}')
+
+
 
     def update_text(self, txt: sg.MLine, view: FileView, file_offset: int):
         if file_offset is None:
             return
 
         # txt.update('')
-        txt.print(f'File Offset {file_offset:x}  {file_offset // 1024}KB', font=('Fira Code', 12, 'bold'))
+        txt.print(f'File Offset {file_offset:x}  {file_offset // 1024}KB', font=(font_name, font_size, 'bold'))
 
         printable_chars = bytes(string.printable.rstrip('\t\n\r\x0b\x0c'), 'ascii')
 
+        txt_width, txt_height = txt.Size
+
         if file_offset >= 0:
-            file_bytes = view.contents[file_offset:file_offset + 128]
-            byte_columns = 32
-            byte_separator = 8
+
+            # Two hex bytes plus one ASCII byte per raw byte
+            max_columns = (txt_width - font_size) // 3
+            byte_columns = (max_columns // 8) * 8
+            byte_rows = 8
+
+            total_bytes = byte_columns * byte_rows
+            file_bytes = view.contents[file_offset:file_offset + total_bytes]
+
+            entropy_bytes = view.contents[file_offset:file_offset+512]
+            self.add_entropy(txt, entropy_bytes)
 
             ascii_line = '  '
 
@@ -386,46 +451,48 @@ class GUIView:
                 full_offset = file_offset + line_offset
 
                 txt.print(f'{full_offset:6x}: ', end='')
-                font_name = 'Fira Code'
 
                 for file_byte, zero_byte in line_data:
                     if file_byte == zero_byte:
-                        txt.print(file_byte.hex(), end='', text_color='black', font=(font_name, 12))
+                        txt.print(file_byte.hex(), end='', text_color='black', font=(font_name, font_size))
                     else:
-                        txt.print(file_byte.hex(), end='', text_color='grey24', font=(font_name, 12, 'underline'))
+                        txt.print(file_byte.hex(), end='', text_color='grey24', font=(font_name, font_size, 'underline'))
 
                 txt.print('  ', end='')
                 for file_byte, zero_byte in line_data:
                     ascii = file_byte.decode('ascii') if file_byte in printable_chars else '.'
                     if file_byte == zero_byte:
-                        txt.print(ascii, end='', font=(font_name, 12))
+                        txt.print(ascii, end='', font=(font_name, font_size))
                     else:
-                        txt.print(ascii, end='', text_color='grey30', font=(font_name, 12, 'underline'))
+                        txt.print(ascii, end='', text_color='grey30', font=(font_name, font_size, 'underline'))
 
                 txt.print('')
-
 
                 # ascii_line = ''.join([fb.decode('ascii') if fb in printable_chars else '.' for fb, zb in line_data])
 
                 # txt.print(ascii_line, end='\n')
 
-
-
-
-        self.add_matches(txt, view, file_offset)
-
+            self.add_matches(txt, view, file_offset)
 
     def add_thunk_txt(self, txt: sg.MLine, view: FileView, file_offset: int):
         if view.elf_thunks:
             for thunk in view.elf_thunks.find_thunks(file_offset, only_nearest=False):
                 name, translated, thunk_off, meta = thunk
                 name_off = f'{name}+0x{thunk_off:x}'
+                if name_off is None:
+                    name_off = -1
+                if translated is None:
+                    translated = -1
                 txt.print(f'Thunk {name_off:16} {translated:6x}')
                 if 'struct' in meta:
-                    for k, v in meta['struct'].items():
-                        if isinstance(v, int):
-                            v = f'0x{v:x}'
-                        txt.print(f'  {k:12} = {v}')
+                    s = meta['struct']
+                    if isinstance(s, dict):
+                        for k, v in s.items():
+                            if isinstance(v, int):
+                                v = f'0x{v:x}'
+                            txt.print(f'  {k:12} = {v}', font=(font_name, font_size-1))
+                    else:
+                        txt.print(str(s), font=(font_name, font_size-1))
 
     def update_texts(self):
         self.bottom_text.update('')
@@ -434,6 +501,9 @@ class GUIView:
         file_offset = self.view1.get_hover_file_offset()
         self.update_text(self.bottom_text, self.view1, file_offset)
         self.add_thunk_txt(self.bottom_text2, self.view1, file_offset)
+
+        self.bottom_text.set_vscroll_position(0)
+        self.bottom_text2.set_vscroll_position(0)
 
     def event_loop(self):
         self.adjust_sizes()

@@ -61,8 +61,12 @@ class MemFile:
 
         # if self.n_removed % 100000 == 0:
         #     status.update('Zeroize', n_zeroize=self.n_removed)
-        for i in range(off, off + nbytes):
-            self.data[i] = 0
+        try:
+            for i in range(off, off + nbytes):
+                self.data[i] = 0
+        except IndexError:
+            # Tried to zeroize past end of file?
+            pass
 
     def zeroize_if(self, off, min_val, max_val):
         val, = struct.unpack('<i', self.data[off:off + 4])
@@ -94,6 +98,9 @@ class MemFile:
 
         for opcode in modrm_instructions:
             for offset in self.scan_byte(opcode):
+                if offset + 1 >= len(self.data):
+                    continue
+
                 modrm = self.data[offset + 1]
                 is_pc_rel = (modrm & 0xc7) == 0x05
 
@@ -105,6 +112,9 @@ class MemFile:
         offset = -1
 
         for offset in self.scan_byte(0x0f):
+            if offset+1 >= len(self.data):
+                continue
+
             opcode_byte2 = self.data[offset + 1]
 
             jmp_codes = list(range(0x80, 0x90))
@@ -116,6 +126,8 @@ class MemFile:
             self.zeroize(offset + 2)
 
         for offset in self.scan_byte(0xff):
+            if offset+1 >= len(self.data):
+                continue
             opcode_byte2 = self.data[offset + 1]
 
             near_call = 0x15

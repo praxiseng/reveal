@@ -1,5 +1,7 @@
-
+import string
 import struct
+import sys
+
 from intervaltree import IntervalTree
 
 
@@ -73,12 +75,97 @@ class Thunk:
             yield a_range, b_range, meta
 
 
+printable_bytes = [
+    ord(i) for i in string.printable if i not in string.whitespace
+]
+def format_printable(name):
+    result = "".join(
+        [
+            chr(i)
+            if (i in printable_bytes)
+            else f"\\x{i:02x}"
+            for i in name.rstrip(b"\x00")
+        ]
+    )
+    return result
+
+
 class ELFThunks:
     def __init__(self, path):
         self.file_to_va_thunk = None
         self.thunks = []
         self.structs = []
 
+        self.try_parse_elf(path)
+
+        if not self.thunks:
+            self.try_parse_pe(path)
+
+    def try_parse_pe(self, path):
+        import pefile
+        pe = pefile.PE(path)
+
+        # print(f"Parsing PE {pe}")
+
+
+
+        section_thunk = Thunk('File Offset', 'RVA')
+        struct_thunk = Thunk('File Offset', 'RVA')
+        self.thunks = [section_thunk, struct_thunk]
+        for section in pe.sections:
+
+            section: pefile.SectionStructure
+            #print(section)
+            #print(f'Section {format_printable(section.Name)}  {section.get_file_offset():5x} {section.sizeof():x}')
+
+            meta = dict(name = format_printable(section.Name),
+                        struct=str(section))
+
+            rva_lo = section.section_min_addr
+            rva_hi = section.section_max_addr
+            file_lo = section.get_offset_from_rva(rva_lo)
+            file_hi = section.get_offset_from_rva(rva_hi)
+            #print(f'{rva_lo:x}-{rva_hi:x} {file_lo:x}-{file_hi:x}')
+            section_thunk.add((file_lo, file_hi - file_lo),
+                              (rva_lo, rva_hi - rva_lo),
+                              meta)
+
+        for struct in pe.__structures__:
+            struct: pefile.Structure
+            if struct in pe.sections:
+                continue
+
+            lo = struct.get_file_offset()
+            sz = struct.sizeof()
+
+            rva, thunk_meta = section_thunk.translate(lo)
+
+            meta = dict(name = struct.name,
+                        struct=str(struct))
+
+            if rva is None:
+                rva_range = (0, 0)
+            else:
+                rva_range = (rva, sz)
+
+            struct_thunk.add((lo, sz), rva_range, meta)
+
+            #print(f'Struct {struct.name} {struct.get_file_offset():5x} {struct.sizeof():x}')
+
+        if hasattr(pe, "DIRECTORY_ENTRY_RESOURCE"):
+            for rsrc in pe.DIRECTORY_ENTRY_RESOURCE.entries:
+                for entry in rsrc.directory.entries:
+                    entry: pefile.ResourceDirEntryData
+
+                    offset = entry.directory.entries[0].data.struct.OffsetToData
+                    size = entry.directory.entries[0].data.struct.Size
+
+                    meta = dict(name=entry.name or f'RESOURCE {entry.id}',
+                                struct=str(entry.struct))
+
+                    struct_thunk.add((offset, size), (0,0), meta)
+
+    def try_parse_elf(self, path):
         from elftools.elf.elffile import ELFFile
         from elftools.common.exceptions import ELFError
         with open(path, 'rb') as f:
@@ -87,10 +174,10 @@ class ELFThunks:
             except ELFError:
                 return
 
-            self.section_thunk = Thunk('File Offset', 'Virtual Address')
-            self.segment_thunk = Thunk('File Offset', 'Virtual Address')
-            self.file_to_va_thunk = self.section_thunk
-            self.thunks = [self.segment_thunk, self.section_thunk]
+            section_thunk = Thunk('File Offset', 'Virtual Address')
+            segment_thunk = Thunk('File Offset', 'Virtual Address')
+            # self.file_to_va_thunk = self.section_thunk
+            self.thunks = [section_thunk, segment_thunk]
 
             for sect in elffile.iter_sections():
                 flags = sect.header['sh_flags']
@@ -109,7 +196,7 @@ class ELFThunks:
                 file_size = sh_size if has_file_bytes else 0
 
                 meta = dict(name = sect.name or sh_type, struct = dict(sect.header))
-                self.segment_thunk.add((sh_offset,file_size), (sh_addr,mem_size), meta)
+                segment_thunk.add((sh_offset,file_size), (sh_addr,mem_size), meta)
 
                 #print(f'Section {sect.name:20} {flag_txt} {sh_offset:6x}+{file_size:<6x}  {sh_addr:6x}+{mem_size:<6x} {sect.header}')
 
@@ -127,7 +214,7 @@ class ELFThunks:
                 flagtxt = ''.join(txt if (flags & mask) else ' ' for mask, txt in flagmap)
 
                 meta = dict(name = p_type, struct = dict(seg.header))
-                self.section_thunk.add((p_offset, p_filesz), (p_vaddr, p_memsz), meta)
+                section_thunk.add((p_offset, p_filesz), (p_vaddr, p_memsz), meta)
 
 
                 #print(f'Segment {p_type:20} {flagtxt} {p_offset:6x}+{p_filesz:<6x} {p_vaddr:6x}+{p_memsz:<6x} {dict(seg.header)}')
@@ -168,3 +255,8 @@ class ELFThunks:
         for a, b, meta in self.file_to_va_thunk.all_in_range(file_offset):
             trans = try_translate(file_offset, a, b)
             return trans
+
+
+
+if __name__ == "__main__":
+    thunks = ELFThunks(sys.argv[1])
