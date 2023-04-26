@@ -1,3 +1,5 @@
+import cProfile as profile
+import pstats
 import time
 import sys
 import hashlib
@@ -227,3 +229,19 @@ class Uniq:
             if curvals:
                 self.n_uniq_sectors += 1
                 target.send((curkey, curvals))
+
+
+class Profiler:
+    def __init__(self, n_stats=50, sort="cumtime"):
+        self.prof = profile.Profile()
+        self.n_stats = n_stats
+        self.sort = sort
+
+    def __enter__(self):
+        self.prof.enable()
+
+    def __exit__(self, exc_type, exc_value, exc_tb):
+        self.prof.disable()
+
+        stats = pstats.Stats(self.prof).strip_dirs().sort_stats(self.sort)
+        stats.print_stats(self.n_stats)

@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import time
+import traceback
 from collections import defaultdict
 from typing import Generator
 
@@ -247,15 +248,43 @@ class RollingSearchDB:
             offset integer not null,
             PRIMARY KEY (hash_id, offset)
         ) WITHOUT ROWID
+    ''','''
+        CREATE TABLE "MATCH_RESULTS" (
+            hash_id integer not null,
+            file_count integer not null,
+            hash_count integer not null,
+            offset integer not null,
+            file_names VARCHAR,
+            file_ids VARCHAR,
+            PRIMARY KEY (offset, hash_id)
+        ) WITHOUT ROWID
     ''']
 
-    def __init__(self, path, delete_existing=True):
+    def __init__(self, path, delete_existing=False):
         self.path = path
-        self.db_connection = init_db(path, RollingSearchDB.tables, delete_existing)
+        self.db_connection = None
+        if delete_existing:
+            self.delete()
+        self.open()
 
     def close(self):
-        self.db_connection.close()
-        self.db_connection = None
+        if self.db_connection:
+            self.db_connection.close()
+            self.db_connection = None
+
+    def delete(self):
+        self.close()
+        if os.path.exists(self.path):
+            os.remove(self.path)
+
+    def open(self):
+        if not self.db_connection:
+            self.db_connection = init_db(self.path, RollingSearchDB.tables, False)
+        return self.db_connection
+
+    def rebuild(self):
+        self.delete()
+        self.open()
 
     def rolling_hash(self,
                      file_path,
@@ -289,6 +318,56 @@ class RollingSearchDB:
         if new_records:
             self.db_connection.executemany(insert_query, sorted(new_records))
             self.db_connection.commit()
+
+    def run_search_query(self, hash_db_path, block_size):
+        sql_db = self.db_connection
+
+        match_query = '''
+            SELECT hash_id, file_count, hash_count, offset, file_names, file_ids FROM MATCH_RESULTS
+        '''
+        status.start_process('QueryResults', 'Querying match results')
+        matches = list(rowgen2(sql_db, match_query))
+        status.finish_process('QueryResults')
+
+        if not matches:
+            status.start_process('PopulateTable', 'Populating search result table')
+            sql_db.execute(f'ATTACH DATABASE "{hash_db_path}" AS HASH_DB')
+
+            self.db_connection.execute(f'''
+                 INSERT INTO MATCH_RESULTS (hash_id, file_count, hash_count, offset, file_names, file_ids)
+                 SELECT HC.hash_id, HC.file_count, HC.hash_count, RH.offset, HFN.FILE_NAMES, HFN.FILE_IDS
+                 FROM HASH_DB.HASHCOUNT AS HC 
+                 INNER JOIN ROLLING_HASH as RH ON HC.hash_id == RH.hash_id
+                 LEFT JOIN HASH_DB.HASH_FILE_NAMES AS HFN on HFN.hash_id == HC.hash_id AND HC.file_count < 1000
+                 ORDER BY RH.offset''')
+            self.db_connection.commit()
+
+            status.finish_process('PopulateTable')
+
+            status.start_process('QueryResults', 'Querying match results')
+            matches = list(rowgen2(sql_db, match_query))
+            status.finish_process('QueryResults')
+
+        offsetCounts = {}
+
+        for hash_id, file_count, hash_count, offset, file_names, file_ids in matches:
+            offset2 = offset+block_size
+
+            count1 = offsetCounts.setdefault(offset, OffsetCount(offset))
+            count2 = offsetCounts.setdefault(offset2, OffsetCount(offset2))
+
+            count1.fileCount += file_count
+            count2.fileCount -= file_count
+            count1.hashCount += hash_count
+            count2.hashCount -= hash_count
+
+            fids = set(int(fid) for fid in file_ids.split(',')) if file_ids else set()
+
+            for fid in fids:
+                count1.fid_set[fid] += 1
+                count2.fid_set[fid] -= 1
+
+        return offsetCounts
 
 
 def import_nsrl_db(hash_db_path, nsrl_db_path, rebuild=False):
@@ -400,45 +479,6 @@ def accumulate(count_deltas : dict[int, OffsetCount]) -> list[OffsetCount]:
 
     return counts
 
-
-def run_search_query(hash_db_path, search_db_path, search_file, rebuild_search_db, block_size):
-    if rebuild_search_db or not os.path.exists(search_db_path):
-        search_db = RollingSearchDB(search_db_path, rebuild_search_db)
-        search_db.rolling_hash(search_file, block_size)
-        search_db.close()
-
-    sql_db = sqlite3.connect(hash_db_path)
-    sql_db.execute(f'ATTACH DATABASE "{search_db_path}" AS SEARCH')
-
-    count_hashes = rowgen2(sql_db, f'''
-         SELECT HC.hash_id, HC.file_count, HC.hash_count, RH.offset, HFN.FILE_NAMES, HFN.FILE_IDS
-         FROM HASHCOUNT AS HC 
-         INNER JOIN SEARCH.ROLLING_HASH as RH ON HC.hash_id == RH.hash_id
-         LEFT JOIN HASH_FILE_NAMES AS HFN on HFN.hash_id == HC.hash_id AND HC.file_count < 1000
-         ORDER BY RH.offset''')
-
-    offsetCounts = {}
-
-    for hash_id, file_count, hash_count, offset, file_names, file_ids in count_hashes:
-        offset2 = offset+block_size
-
-        count1 = offsetCounts.setdefault(offset, OffsetCount(offset))
-        count2 = offsetCounts.setdefault(offset2, OffsetCount(offset2))
-
-        count1.fileCount += file_count
-        count2.fileCount -= file_count
-        count1.hashCount += hash_count
-        count2.hashCount -= hash_count
-
-        fids = set(int(fid) for fid in file_ids.split(',')) if file_ids else set()
-
-        for fid in fids:
-            count1.fid_set[fid] += 1
-            count2.fid_set[fid] -= 1
-
-    return offsetCounts
-
-
 def match_set_analysis(cumulative_counts: list[OffsetCount]) -> list[MatchSet]:
     match_sets = {}
 
@@ -476,10 +516,25 @@ def search_file_in_hashdb(args):
     search_db_path = args['SEARCH_DB']
     search_file = args['SEARCH_FILE']
 
-    print(f'Running search query')
-    offset_counts = run_search_query(hash_db_path, search_db_path, search_file, rebuild, block_size)
+    status.start_process('FindMatches', 'Finding Matches')
+
+    search_db = RollingSearchDB(search_db_path)
+    if rebuild:
+        status.start_process('RollingHash', 'Rolling Hash')
+        search_db.rebuild()
+        search_db.rolling_hash(search_file, block_size)
+        status.finish_process('RollingHash')
+
+    offset_counts = search_db.run_search_query(hash_db_path, block_size)
+    search_db.close()
+
+    #offset_counts = run_search_query(hash_db_path, search_db_path, search_file, rebuild, block_size)
+
     cumulativeCounts = accumulate(offset_counts)
     match_sets = match_set_analysis(cumulativeCounts)
+
+
+    status.finish_process('FindMatches')
 
     sql_db = sqlite3.connect(hash_db_path)
     fid_to_name = {file_id: FileRecord(file_id, name, path)

@@ -9,10 +9,15 @@ import filehash
 import PySimpleGUI as sg
 import sql_db
 
+import cProfile as profile
+import pstats
+
 from intervaltree import Interval, IntervalTree
 
 from exefile import ELFThunks
 import entropy
+
+import util
 
 font_name = 'Fira Code'
 font_size = 12
@@ -61,6 +66,11 @@ class MatchHistogram:
         for oc in self.cumulative_counts:
             canvas_x1 = file_to_canvas_offset(oc.offset)
             canvas_x2 = file_to_canvas_offset(oc.offset + oc.length)
+
+            if canvas_x2 < 0:
+                continue
+            if canvas_x1 > 10000:
+                continue
 
             fs = oc.get_frozen_set()
 
@@ -377,8 +387,8 @@ class GUIView:
                     txt.print(' '.join(sorted(fnames)[:50]), font=(font_name, font_size-1))
                 else:
                     paths = [file.path for file in files]
-                    for path in sorted(paths):
-                        txt.print(f'{path}', font=(font_name, font_size-1))
+                    path_txt = '\n'.join(paths)
+                    txt.print(path_txt, font=(font_name, font_size-1))
 
     def add_entropy(self, txt: sg.MLine, file_bytes: bytes):
         entropies = []
@@ -399,7 +409,80 @@ class GUIView:
         value = '  '.join(f'{name} {value:5.3f}' for name, value in entropies)
         txt.print(f'Entropy {value}')
 
+    def add_hexdump(self,
+                    txt: sg.MLine,
+                    view: FileView,
+                    file_offset: int):
+        txt_width, txt_height = txt.Size
 
+        # Two hex bytes plus one ASCII byte per raw byte
+        max_columns = (txt_width - font_size) // 3
+        byte_columns = (max_columns // 8) * 8
+        byte_rows = 8
+
+        total_bytes = byte_columns * byte_rows
+        file_bytes = view.contents[file_offset:file_offset + total_bytes]
+
+        lines = []
+
+        line_data = []
+        line_offset = 0
+
+        printable_chars = set(ord(i) for i in string.printable if i not in string.whitespace)
+        for offset in range(0, len(file_bytes)):
+            full_offset = file_offset + offset
+            if offset and offset % byte_columns == 0:
+                lines.append((line_offset, line_data))
+                line_data = []
+                line_offset = offset
+
+            file_bytes = view.contents[full_offset:full_offset + 1]
+            z_bytes = view.zeroized_file[full_offset:full_offset + 1]
+
+            line_data.append((file_bytes, z_bytes))
+
+        if line_data:
+            lines.append((line_offset, line_data))
+
+        for line_offset, line_data in lines:
+            full_offset = file_offset + line_offset
+
+            txt.print(f'{full_offset:6x}: ', end='')
+
+            # here we try to minimize the number of calls to sg.MLine.print by grouping similar items together
+            line_groups = []
+            fb_accum = b''
+            zb_accum = b''
+            for file_byte, zero_byte in line_data:
+                accum_match = fb_accum == zb_accum
+                byte_match = file_byte == zero_byte
+
+                if not fb_accum or accum_match == byte_match:
+                    fb_accum += file_byte
+                    zb_accum += zero_byte
+                else:
+                    line_groups.append((fb_accum, zb_accum))
+                    fb_accum = file_byte
+                    zb_accum = zero_byte
+            if fb_accum:
+                line_groups.append((fb_accum, zb_accum))
+
+
+            for file_byte, zero_byte in line_groups:
+                if file_byte == zero_byte:
+                    txt.print(file_byte.hex(), end='', text_color='black', font=(font_name, font_size))
+                else:
+                    txt.print(file_byte.hex(), end='', text_color='grey24', font=(font_name, font_size, 'underline'))
+
+            txt.print('  ', end='')
+            for file_byte, zero_byte in line_groups:
+                ascii = ''.join([chr(b) if b in printable_chars else '.' for b in file_byte])
+                if file_byte == zero_byte:
+                    txt.print(ascii, end='', font=(font_name, font_size))
+                else:
+                    txt.print(ascii, end='', text_color='grey30', font=(font_name, font_size, 'underline'))
+
+            txt.print('')
 
     def update_text(self, txt: sg.MLine, view: FileView, file_offset: int):
         if file_offset is None:
@@ -408,70 +491,13 @@ class GUIView:
         # txt.update('')
         txt.print(f'File Offset {file_offset:x}  {file_offset // 1024}KB', font=(font_name, font_size, 'bold'))
 
-        printable_chars = bytes(string.printable.rstrip('\t\n\r\x0b\x0c'), 'ascii')
-
-        txt_width, txt_height = txt.Size
 
         if file_offset >= 0:
-
-            # Two hex bytes plus one ASCII byte per raw byte
-            max_columns = (txt_width - font_size) // 3
-            byte_columns = (max_columns // 8) * 8
-            byte_rows = 8
-
-            total_bytes = byte_columns * byte_rows
-            file_bytes = view.contents[file_offset:file_offset + total_bytes]
+            # We stuff the current character-column .Size attribute into txt.Size when we update the text display width
 
             entropy_bytes = view.contents[file_offset:file_offset+512]
             self.add_entropy(txt, entropy_bytes)
-
-            ascii_line = '  '
-
-            lines = []
-
-            line_data = []
-            line_offset = 0
-
-            for offset in range(0, len(file_bytes)):
-                full_offset = file_offset + offset
-                if offset and offset % byte_columns == 0:
-                    lines.append((line_offset, line_data))
-                    line_data = []
-                    line_offset = offset
-
-                file_bytes = view.contents[full_offset:full_offset + 1]
-                z_bytes = view.zeroized_file[full_offset:full_offset + 1]
-
-                line_data.append((file_bytes, z_bytes))
-
-            if line_data:
-                lines.append((line_offset, line_data))
-
-            for line_offset, line_data in lines:
-                full_offset = file_offset + line_offset
-
-                txt.print(f'{full_offset:6x}: ', end='')
-
-                for file_byte, zero_byte in line_data:
-                    if file_byte == zero_byte:
-                        txt.print(file_byte.hex(), end='', text_color='black', font=(font_name, font_size))
-                    else:
-                        txt.print(file_byte.hex(), end='', text_color='grey24', font=(font_name, font_size, 'underline'))
-
-                txt.print('  ', end='')
-                for file_byte, zero_byte in line_data:
-                    ascii = file_byte.decode('ascii') if file_byte in printable_chars else '.'
-                    if file_byte == zero_byte:
-                        txt.print(ascii, end='', font=(font_name, font_size))
-                    else:
-                        txt.print(ascii, end='', text_color='grey30', font=(font_name, font_size, 'underline'))
-
-                txt.print('')
-
-                # ascii_line = ''.join([fb.decode('ascii') if fb in printable_chars else '.' for fb, zb in line_data])
-
-                # txt.print(ascii_line, end='\n')
-
+            self.add_hexdump(txt, view, file_offset)
             self.add_matches(txt, view, file_offset)
 
     def add_thunk_txt(self, txt: sg.MLine, view: FileView, file_offset: int):
@@ -525,7 +551,6 @@ class GUIView:
 
                 if event.startswith(self.view1.graph_name):
                     self.view1.values = values
-                # print(f'Event={event}, values = {values}')
 
                 if 'RESIZE' in event:
                     self.adjust_sizes()
@@ -537,6 +562,8 @@ class GUIView:
                 self.update_texts()
 
                 self.view1.update_hover_line()
+
+
             except Exception as e:
                 print(traceback.format_exc())
 
