@@ -68,6 +68,9 @@ class Status:
         self.vars = {**self.vars, **vars}
         self._display()
 
+    def print(self, txt, *args, **kwargs):
+        print(f'{color.lineclear}{txt}', *args, **kwargs)
+
     def get(self, key, default=None):
         return self.vars.get(key, default)
 
@@ -232,10 +235,11 @@ class Uniq:
 
 
 class Profiler:
-    def __init__(self, n_stats=50, sort="cumtime"):
+    def __init__(self, n_stats=50, sort="cumtime", min_display_secs=0.5):
         self.prof = profile.Profile()
         self.n_stats = n_stats
         self.sort = sort
+        self.min_display_secs = min_display_secs
 
     def __enter__(self):
         self.prof.enable()
@@ -244,4 +248,5 @@ class Profiler:
         self.prof.disable()
 
         stats = pstats.Stats(self.prof).strip_dirs().sort_stats(self.sort)
-        stats.print_stats(self.n_stats)
+        if stats.total_tt > self.min_display_secs:
+            stats.print_stats(self.n_stats)

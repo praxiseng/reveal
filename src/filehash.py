@@ -401,7 +401,8 @@ class HashedFile:
                 yield sector
             else:
                 self.sectors_entropy_lo += 1
-        print(f'Entropy: {self.sectors_entropy_lo} low, {self.sectors_entropy_hi} high')
+        print(f'{color.lineclear}Entropy: {self.sectors_entropy_lo} blocks below threshold, '
+              f'{self.sectors_entropy_hi} above')
 
     def rollingHashToFile(self,
                           block_size,

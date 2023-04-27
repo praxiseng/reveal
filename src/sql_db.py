@@ -11,9 +11,12 @@ from typing import Generator
 
 from util import status
 
+from match_sets import MatchSet
+
 import docopt
 
 import gui
+import util
 
 from filehash import Sector, HashedFile
 import cbor2
@@ -157,7 +160,7 @@ class SQLHashDB:
                 self.db_connection.executemany(insert_query, sorted(new_records))
                 self.db_connection.commit()
                 n_records += len(new_records)
-                print(f'Inserted {n_records} hash blocks')
+                status.print(f'Inserted {n_records} hash blocks')
                 new_records = []
         if new_records:
             self.db_connection.executemany(insert_query, sorted(new_records))
@@ -205,7 +208,7 @@ class SQLHashDB:
                 self.db_connection.executemany(insert_query, sorted(new_records))
                 self.db_connection.commit()
                 n_records += len(new_records)
-                print(f'Inserted {n_records} hash files')
+                status.print(f'Inserted {n_records} hash files')
 
                 new_records = []
 
@@ -225,157 +228,17 @@ class SQLHashDB:
     def convert_nsrl_to_sector_db(self, input_db_path):
         input_db = sqlite3.connect(input_db_path)
 
-        print(f'Listing Files')
+        status.start_process()
+        status.print(f'Listing Files')
         self.import_nsrl_file_list(input_db)
 
-        print(f'Populating HASHFILES')
+        status.print(f'Populating HASHFILES')
         self.convert_nsrl_hashfiles(input_db)
 
-        print(f'Inserting into HASHCOUNT')
+        status.print(f'Inserting into HASHCOUNT')
         self.populate_hashcount()
 
         input_db.close()
-
-
-class RollingSearchDB:
-    """
-    A RollingSearchDB is a temporary DB with all the rolling hashes from a file.
-    """
-
-    tables = ['''
-        CREATE TABLE "ROLLING_HASH" (
-            hash_id integer not null,
-            offset integer not null,
-            PRIMARY KEY (hash_id, offset)
-        ) WITHOUT ROWID
-    ''','''
-        CREATE TABLE "MATCH_RESULTS" (
-            hash_id integer not null,
-            file_count integer not null,
-            hash_count integer not null,
-            offset integer not null,
-            file_names VARCHAR,
-            file_ids VARCHAR,
-            PRIMARY KEY (offset, hash_id)
-        ) WITHOUT ROWID
-    ''']
-
-    def __init__(self, path, delete_existing=False):
-        self.path = path
-        self.db_connection = None
-        if delete_existing:
-            self.delete()
-        self.open()
-
-    def close(self):
-        if self.db_connection:
-            self.db_connection.close()
-            self.db_connection = None
-
-    def delete(self):
-        self.close()
-        if os.path.exists(self.path):
-            os.remove(self.path)
-
-    def open(self):
-        if not self.db_connection:
-            self.db_connection = init_db(self.path, RollingSearchDB.tables, False)
-        return self.db_connection
-
-    def rebuild(self):
-        self.delete()
-        self.open()
-
-    def rolling_hash(self,
-                     file_path,
-                     bs,
-                     entropy_threshold=0.2):
-        hf = HashedFile(file_path)
-        sectors = hf.genRollingBlocks(bs, step=1, short_blocks=False, limit_range=None)
-
-        # block_gen = self.filter_sector_entropy(block_gen, block_size, threshold=entropy_threshold)
-
-        insert_query = """INSERT INTO ROLLING_HASH
-            (hash_id, offset)
-            VALUES (?, ?)"""
-
-        n_records = 0
-        new_records = []
-
-        sectors = hf.filter_sector_entropy(sectors, bs, threshold=entropy_threshold)
-
-        for sector in sectors:
-            hash_id = get_hash_id(sector.hash())
-            new_records.append((hash_id, sector.offset))
-
-            if len(new_records) >= 1000000:
-                self.db_connection.executemany(insert_query, sorted(new_records))
-                self.db_connection.commit()
-                n_records += len(new_records)
-                print(f'Inserted {n_records} rolling hashes')
-                new_records = []
-
-        if new_records:
-            self.db_connection.executemany(insert_query, sorted(new_records))
-            self.db_connection.commit()
-
-    def run_search_query(self, hash_db_path, block_size):
-        sql_db = self.db_connection
-
-        match_query = '''
-            SELECT hash_id, file_count, hash_count, offset, file_names, file_ids FROM MATCH_RESULTS
-        '''
-        status.start_process('QueryResults', 'Querying match results')
-        matches = list(rowgen2(sql_db, match_query))
-        status.finish_process('QueryResults')
-
-        if not matches:
-            status.start_process('PopulateTable', 'Populating search result table')
-            sql_db.execute(f'ATTACH DATABASE "{hash_db_path}" AS HASH_DB')
-
-            self.db_connection.execute(f'''
-                 INSERT INTO MATCH_RESULTS (hash_id, file_count, hash_count, offset, file_names, file_ids)
-                 SELECT HC.hash_id, HC.file_count, HC.hash_count, RH.offset, HFN.FILE_NAMES, HFN.FILE_IDS
-                 FROM HASH_DB.HASHCOUNT AS HC 
-                 INNER JOIN ROLLING_HASH as RH ON HC.hash_id == RH.hash_id
-                 LEFT JOIN HASH_DB.HASH_FILE_NAMES AS HFN on HFN.hash_id == HC.hash_id AND HC.file_count < 1000
-                 ORDER BY RH.offset''')
-            self.db_connection.commit()
-
-            status.finish_process('PopulateTable')
-
-            status.start_process('QueryResults', 'Querying match results')
-            matches = list(rowgen2(sql_db, match_query))
-            status.finish_process('QueryResults')
-
-        offsetCounts = {}
-
-        for hash_id, file_count, hash_count, offset, file_names, file_ids in matches:
-            offset2 = offset+block_size
-
-            count1 = offsetCounts.setdefault(offset, OffsetCount(offset))
-            count2 = offsetCounts.setdefault(offset2, OffsetCount(offset2))
-
-            count1.fileCount += file_count
-            count2.fileCount -= file_count
-            count1.hashCount += hash_count
-            count2.hashCount -= hash_count
-
-            fids = set(int(fid) for fid in file_ids.split(',')) if file_ids else set()
-
-            for fid in fids:
-                count1.fid_set[fid] += 1
-                count2.fid_set[fid] -= 1
-
-        return offsetCounts
-
-
-def import_nsrl_db(hash_db_path, nsrl_db_path, rebuild=False):
-    if rebuild or not os.path.exists(hash_db_path):
-        hash_db = SQLHashDB(hash_db_path, rebuild)
-        hash_db.convert_nsrl_to_sector_db(nsrl_db_path)
-        hash_db.close()
-
 
 
 class OffsetCount:
@@ -406,32 +269,191 @@ class OffsetCount:
         return self.fileCount and self.fid_set # and self.fileCount < len(self.fid_set) * 2
 
     def get_count(self):
-
         return self.fileCount
 
-        # if self.has_file_list():
-        #     return len(self.fid_set)
-        # else:
-        #     return self.fileCount
+
+def matches_to_offset_counts(matches, block_size) -> dict[int, OffsetCount]:
+    offset_counts = {}
+
+    for hash_id, file_count, hash_count, offset, file_names, file_ids in matches:
+        offset2 = offset+block_size
+
+        count1 = offset_counts.setdefault(offset, OffsetCount(offset))
+        count2 = offset_counts.setdefault(offset2, OffsetCount(offset2))
+
+        count1.fileCount += file_count
+        count2.fileCount -= file_count
+        count1.hashCount += hash_count
+        count2.hashCount -= hash_count
+
+        fids = set(int(fid) for fid in file_ids.split(',')) if file_ids else set()
+
+        for fid in fids:
+            count1.fid_set[fid] += 1
+            count2.fid_set[fid] -= 1
+
+    return offset_counts
 
 
-class MatchSet:
-    def __init__(self, file_set, count_of_bytes = 0):
-        self.file_set = frozenset(file_set)
-        self.count_of_bytes = count_of_bytes
-        self.match_ranges = []
+class FileRecord:
+    def __init__(self, fid, name, path):
+        self.fid = fid
+        self.name = name
+        self.path = path
 
-        # For use with GUI processing
-        self.color = None
 
-    def add_match_range(self, lo, hi):
-        # WARNING: this is not designed to handle overlapping ranges
-        self.match_ranges.append((lo, hi))
-        self.count_of_bytes += hi - lo
+class SearchDB:
+    """
+    A SearchDB holds search results.  A search takes a file of interest, computes a rolling hash, and looks at the
+    matches for those rolling hashes.
+    """
 
-    def similarity(self, other):
-        return len(self.file_set & other.file_set) / len(self.file_set | other.file_set)
+    tables = ['''
+        CREATE TABLE "ROLLING_HASH" (
+            hash_id integer not null,
+            offset integer not null,
+            PRIMARY KEY (hash_id, offset)
+        ) WITHOUT ROWID
+    ''','''
+        CREATE TABLE "MATCH_RESULTS" (
+            hash_id integer not null,
+            file_count integer not null,
+            hash_count integer not null,
+            offset integer not null,
+            file_names VARCHAR,
+            file_ids VARCHAR,
+            PRIMARY KEY (offset, hash_id)
+        ) WITHOUT ROWID
+    ''','''
+    CREATE TABLE "FILES" (
+        file_id INTEGER PRIMARY KEY not null,
+        name TEXT,
+        path TEXT,
+        file_hash TEXT,
+        metadata_id INTEGER
+    )
+    ''']
 
+    def __init__(self, path, delete_existing=False):
+        self.path = path
+        self.db_connection = None
+        if delete_existing:
+            self.delete()
+
+        self.is_new = not os.path.exists(path)
+        self.open()
+
+        self.fid_to_name = None
+
+    def close(self):
+        if self.db_connection:
+            self.db_connection.close()
+            self.db_connection = None
+
+    def delete(self):
+        self.close()
+        if os.path.exists(self.path):
+            os.remove(self.path)
+            self.is_new = True
+
+    def open(self):
+        if not self.db_connection:
+            self.db_connection = init_db(self.path, SearchDB.tables, False)
+        return self.db_connection
+
+    def rebuild(self):
+        self.delete()
+        self.open()
+
+    def rolling_hash(self,
+                     file_path,
+                     bs,
+                     entropy_threshold=0.2):
+        hf = HashedFile(file_path)
+        sectors = hf.genRollingBlocks(bs, step=1, short_blocks=False, limit_range=None)
+
+        # block_gen = self.filter_sector_entropy(block_gen, block_size, threshold=entropy_threshold)
+
+        insert_query = "INSERT INTO ROLLING_HASH (hash_id, offset) VALUES (?, ?)"
+
+        n_records = 0
+        new_records = []
+
+        sectors = hf.filter_sector_entropy(sectors, bs, threshold=entropy_threshold)
+
+        status.start_process('RollingHash', '{n_hashes} Rolling Hashes', n_hashes=0)
+        for sector in sectors:
+            hash_id = get_hash_id(sector.hash())
+            new_records.append((hash_id, sector.offset))
+
+            if len(new_records) >= 1000000:
+                self.db_connection.executemany(insert_query, sorted(new_records))
+                self.db_connection.commit()
+                n_records += len(new_records)
+                status.update('RollingHash', n_hashes= n_records)
+                new_records = []
+
+        if new_records:
+            self.db_connection.executemany(insert_query, sorted(new_records))
+            self.db_connection.commit()
+
+        status.finish_process('RollingHash')
+
+    def query_search_results(self):
+        match_query = '''
+            SELECT hash_id, file_count, hash_count, offset, file_names, file_ids FROM MATCH_RESULTS
+        '''
+        status.start_process('QueryResults', 'Querying match results')
+        matches = list(rowgen2(self.db_connection, match_query))
+        status.finish_process('QueryResults')
+
+        return matches
+
+    def _run_search_query(self, hash_db_path):
+        status.start_process('PopulateTable', 'Populating MATCH_RESULTS table')
+        self.db_connection.execute(f'ATTACH DATABASE "{hash_db_path}" AS HASH_DB')
+        self.db_connection.execute(f'''
+             INSERT INTO MATCH_RESULTS (hash_id, file_count, hash_count, offset, file_names, file_ids)
+             SELECT HC.hash_id, HC.file_count, HC.hash_count, RH.offset, HFN.FILE_NAMES, HFN.FILE_IDS
+             FROM HASH_DB.HASHCOUNT AS HC 
+             INNER JOIN ROLLING_HASH as RH ON HC.hash_id == RH.hash_id
+             LEFT JOIN HASH_DB.HASH_FILE_NAMES AS HFN on HFN.hash_id == HC.hash_id AND HC.file_count < 1000
+             ORDER BY RH.offset''')
+        self.db_connection.commit()
+
+        # Copy file list over to be self-contained
+        self.db_connection.execute('INSERT INTO FILES SELECT * FROM HASH_DB.FILES')
+
+        self.db_connection.commit()
+        status.finish_process('PopulateTable')
+
+    def run_search_query(self, hash_db_path):
+        matches = self.query_search_results()
+
+        if not matches:
+            self._run_search_query(hash_db_path)
+            matches = self.query_search_results()
+
+        return matches
+
+    def _get_fid_to_name(self):
+
+        fid_to_name = {file_id: FileRecord(file_id, name, path)
+                       for file_id, name, path in
+                       rowgen2(self.db_connection, "SELECT file_id, name, path FROM FILES")}
+        return fid_to_name
+
+    def fid_lookup(self, fid: int) -> FileRecord:
+        if self.fid_to_name is None:
+            self.fid_to_name = self._get_fid_to_name()
+
+        return self.fid_to_name[fid]
+
+def import_nsrl_db(hash_db_path, nsrl_db_path, rebuild=False):
+    if rebuild or not os.path.exists(hash_db_path):
+        hash_db = SQLHashDB(hash_db_path, rebuild)
+        hash_db.convert_nsrl_to_sector_db(nsrl_db_path)
+        hash_db.close()
 
 def accumulate(count_deltas : dict[int, OffsetCount]) -> list[OffsetCount]:
     """
@@ -500,57 +522,43 @@ def match_set_analysis(cumulative_counts: list[OffsetCount]) -> list[MatchSet]:
     return sorted(match_sets.values(), key=lambda ms: -ms.count_of_bytes)
 
 
-class FileRecord:
-    def __init__(self, fid, name, path):
-        self.fid = fid
-        self.name = name
-        self.path = path
-
-
-def search_file_in_hashdb(args):
+def search_file_in_hashdb(args, search_db):
     block_size = int(args['--blocksize'])
 
     rebuild = args['--rebuild']
     hash_db_path = args['HASH_DB']
 
-    search_db_path = args['SEARCH_DB']
     search_file = args['SEARCH_FILE']
 
     status.start_process('FindMatches', 'Finding Matches')
 
-    search_db = RollingSearchDB(search_db_path)
     if rebuild:
-        status.start_process('RollingHash', 'Rolling Hash')
         search_db.rebuild()
+    if search_db.is_new:
         search_db.rolling_hash(search_file, block_size)
-        status.finish_process('RollingHash')
 
-    offset_counts = search_db.run_search_query(hash_db_path, block_size)
-    search_db.close()
-
-    #offset_counts = run_search_query(hash_db_path, search_db_path, search_file, rebuild, block_size)
-
-    cumulativeCounts = accumulate(offset_counts)
-    match_sets = match_set_analysis(cumulativeCounts)
-
+    matches = search_db.run_search_query(hash_db_path)
+    #search_db.close()
 
     status.finish_process('FindMatches')
 
-    sql_db = sqlite3.connect(hash_db_path)
-    fid_to_name = {file_id: FileRecord(file_id, name, path)
-                   for file_id, name, path in
-                   rowgen2(sql_db, "SELECT file_id, name, path FROM FILES")}
+    return matches
 
-    def fid_lookup(fid: int) -> FileRecord:
-        return fid_to_name[fid]
+def show_gui(matches, block_size, search_file, fid_lookup):
 
-    print(f'Lengths: {len(offset_counts)} {len(cumulativeCounts)} {len(match_sets)}')
+    with util.Profiler(15):
+        offset_counts = matches_to_offset_counts(matches, block_size)
 
-    print(f'Initializing GUI')
-    gui_view = gui.GUIView(search_file)
-    gui_view.set_counts(fid_lookup, cumulativeCounts, match_sets)
+        cumulative_counts = accumulate(offset_counts)
+        match_sets = match_set_analysis(cumulative_counts)
 
-    print(f'Entering GUI event loop')
+        status.print(f'Lengths: {len(offset_counts)} {len(cumulative_counts)} {len(match_sets)}')
+
+        status.print(f'Initializing GUI')
+        gui_view = gui.GUIView(search_file)
+        gui_view.set_counts(fid_lookup, cumulative_counts, match_sets)
+
+    status.print(f'Entering GUI event loop')
     gui_view.event_loop()
 
 
@@ -608,7 +616,7 @@ def ingest_files(hash_db_path, files_to_ingest, bs, only_exe, use_glob):
             sector_gen = hf.genAlignedBlocks(bs=bs)
             hash_db.add_hash_blocks(fid, sector_gen)
         except PermissionError as e:
-            print(f'Permission error {e}')
+            print(f'\nPermission error {e}')
         status.finish_process('IngestFile', n_file_hashes=hash_db.last_file_hashes)
 
     status.finish_process('Ingesting', n_files=n_files, n_hashes=hash_db.total_hashes_added)
@@ -619,8 +627,6 @@ def ingest_files(hash_db_path, files_to_ingest, bs, only_exe, use_glob):
     hash_db.finalize_ingest()
     status.finish_process('FinalizingIngest')
 
-
-
     hash_db.populate_hashcount()
 
 
@@ -628,15 +634,16 @@ usage = """
 REveal SQL Database Tool
 
 Usage:
-    sql_db ingest HASH_DB FILES... [options]
+    sql_db ingest HASH_DB FILES... [options] [--exe] [--glob]
     sql_db import HASH_DB NSRL_DB [options]
-    sql_db search HASH_DB SEARCH_DB SEARCH_FILE [options]
+    sql_db search HASH_DB SEARCH_DB SEARCH_FILE [options] [--show]
+    sql_db show SEARCH_DB SEARCH_FILE
 
 Options:
     --rebuild         When creating a database, delete that database and make a clean one.
                       This includes the HASH_DB when using "import" and the cached search
                       database when using "search"
-    --blocksize BS    Sector block size [default: 128]
+    --blocksize SIZE  Sector block size [default: 128]
     --exe             Only process executable files (PE or ELF) for ingest
     --glob            Use globbing on the list of files for ingest
 """
@@ -648,14 +655,27 @@ def main():
     rebuild = args['--rebuild']
     hash_db_path = args['HASH_DB']
 
+    bs = int(args['--blocksize'])
+
     if args['ingest']:
-        ingest_files(args['HASH_DB'], args['FILES'], int(args['--blocksize']), args['--exe'], args['--glob'])
+        ingest_files(hash_db_path, args['FILES'], bs, args['--exe'], args['--glob'])
 
     if args['import']:
-        import_nsrl_db(args['HASH_DB'], args['NSRL_DB'], args['--rebuild'])
+        import_nsrl_db(hash_db_path, args['NSRL_DB'], args['--rebuild'])
 
-    if args['search']:
-        search_file_in_hashdb(args)
+    search = args['search']
+    show = args['show'] or args['--show']
+
+    if search or show:
+        search_db = SearchDB(args['SEARCH_DB'])
+
+        matches = search and search_file_in_hashdb(args, search_db)
+
+        if show:
+            matches = matches or search_db.query_search_results()
+            show_gui(matches, bs, args['SEARCH_FILE'], search_db.fid_lookup)
+
+
 
 
 if __name__ == "__main__":
