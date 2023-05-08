@@ -1,3 +1,0 @@
-[submodule "components/docopt.cpp"]
-	path = components/docopt.cpp
-	url = https://github.com/docopt/docopt.cpp

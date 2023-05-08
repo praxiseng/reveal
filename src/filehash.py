@@ -1,9 +1,6 @@
 from typing import Generator
 
-import reveal_globals as rg
-import os
 from util import *
-from hashlist import *
 from entropy import *
 import struct
 
@@ -163,7 +160,7 @@ class FileCursor:
 
 
 class HashedFile:
-    def __init__(self, path, id=-1):
+    def __init__(self, path, zeroize=True):
         full_path = path
         try:
             full_path = os.path.realpath(path)
@@ -171,8 +168,9 @@ class HashedFile:
             print(f"Error getting real path for {path}")
             print(e)
 
+        self.zeroize = zeroize
+
         self.path = full_path
-        self.id = id
         self.whole_file_hash = None
 
         self.sectors_entropy_hi = 0
@@ -191,18 +189,13 @@ class HashedFile:
     def openFile(self):
         # return open(self.path, 'rb')
         if not self.file_data:
-            self.file_data = MemFile(self.path, None, rg.globs.ZEROIZE_X86_PC_REL)
+            self.file_data = MemFile(self.path, None, self.zeroize)
         return self.file_data
 
     def getWholeFileHash(self):
         if not self.whole_file_hash:
             self.whole_file_hash = get_whole_file_hash(self.path)
         return self.whole_file_hash
-
-    def getData(self):
-        return dict(path=self.path,
-                    id=self.id,
-                    md5=self.getWholeFileHash())
 
     def entropyValues(self, bs):
         with self.openFile() as fd:
@@ -269,57 +262,6 @@ class HashedFile:
         if hi1:
             yield (lo1, hi1)
 
-    def genericSectorHash(self, sectors, output, uniq=True):
-        # TODO: chunk large lists instead of iterating the whole thing
-
-        status.start_process("Hashing",
-                             'Hash  ' + (' ' * 8) + '{sectors_hashed:<7} {filepath}',
-                             sectors_hashed=0, filepath=self.path)
-
-        sector_list = []
-        sum_hashes = status.get('sum_hashes', 0)
-        sectors_hashed = 0
-        for sector in sectors:
-            sector_list.append(sector.getHashTuple())
-            if (sectors_hashed % 20000) == 0:
-                status.update("Hashing", sectors_hashed=sectors_hashed, sum_hashes=sum_hashes + sectors_hashed)
-            sectors_hashed += 1
-        status.finish_process("Hashing", sectors_hashed=sectors_hashed, sum_hashes=sum_hashes + sectors_hashed)
-
-        status.start_process("Sorting", 'Sort  ' + (' ' * 8) + '{sectors_hashed:<7} {filepath}')
-        sorted_sectors = sorted(sector_list)
-        status.finish_process("Sorting")
-
-        u = Uniq()
-        if uniq:
-            output = u.uniq(summarize_large_hash_lists(output, rg.globs.MAX_LIST_SIZE))
-        else:
-            u.n_uniq_sectors = len(sorted_sectors)
-
-        status.start_process("Output", 'Write {n_uniq_sectors:7}/{sectors_written:<7} {filepath}',
-                             sectors_written=0,
-                             n_uniq_sectors=u.n_uniq_sectors)
-
-        sectors_written = 0
-
-        sum_uniq = status.get('sum_uniq_hashes', 0)
-        for hash_tuple in sorted_sectors:
-            sectors_written += 1
-            output.send(hash_tuple)
-
-            if sectors_written % 10000 == 0:
-                status.update('Output',
-                              sectors_written=sectors_written,
-                              n_uniq_sectors=self.n_uniq_sectors,
-                              sum_uniq_hashes=sum_uniq + u.n_uniq_sectors)
-
-        status.finish_process('Output',
-                              sectors_written=sectors_written,
-                              n_uniq_sectors=self.n_uniq_sectors,
-                              sum_uniq_hashes=sum_uniq + u.n_uniq_sectors)
-
-        return (sectors_hashed, self.n_uniq_sectors)
-
     def genAlignedBlocks(self, bs=10, offset=0, short_blocks=True):
         with self.openFile() as fd:
             while True:
@@ -359,19 +301,6 @@ class HashedFile:
                 if hi and offset >= hi:
                     break
 
-    def hashBlocksToFile(self, block_size, out_file_path, short_blocks=False, uniq=True, entropy_threshold=0.2) \
-            -> HashListFile:
-        hl = HashListFile(out_file_path)
-        out_file = hl.createFile(self,
-                                 block_size,
-                                 rg.globs.ZEROIZE_X86_PC_REL,
-                                 dict(aligned=1, step=block_size, shortBlocks=short_blocks),
-                                 self.get_entropy_ranges(block_size, entropy_threshold=entropy_threshold))
-        block_gen = self.genAlignedBlocks(block_size, short_blocks=short_blocks)
-        sectors_hashed = self.genericSectorHash(block_gen, out_file, uniq=uniq)
-
-        return hl
-
     def get_entropy_ranges(self, block_size, entropy_threshold):
         if self.entropy_block_size != block_size or self.entropy_threshold != entropy_threshold:
             self.entropy_block_size = block_size
@@ -407,38 +336,3 @@ class HashedFile:
                 self.sectors_entropy_lo += 1
         print(f'{color.lineclear}Entropy: {self.sectors_entropy_lo} blocks below threshold, '
               f'{self.sectors_entropy_hi} above')
-
-    def rollingHashToFile(self,
-                          block_size,
-                          out_file_path,
-                          step=1,
-                          short_blocks=False,
-                          uniq=True,
-                          entropy_threshold=0.2,
-                          limit_range=None) -> HashListFile:
-        hl = HashListFile(out_file_path)
-
-        block_gen = self.genRollingBlocks(block_size, step=step, short_blocks=short_blocks, limit_range=limit_range)
-        output = hl.createFile(self,
-                               block_size,
-                               rg.globs.ZEROIZE_X86_PC_REL,
-                               dict(aligned=0, step=1, shortBlocks=short_blocks),
-                               self.get_entropy_ranges(block_size, entropy_threshold))
-
-        self.displayEntropyMap(64, 64)
-
-        ranges = self.get_entropy_ranges(block_size, entropy_threshold)
-        print("CRanges:")
-        for lo, hi in ranges:
-            print(f"Range {lo:5x}-{hi:5x}")
-        # block_gen = sectorEntropyFilter(0.5, block_gen)
-
-        # sys.exit()
-
-        block_gen = self.filter_sector_entropy(block_gen, block_size, threshold=entropy_threshold)
-        self.genericSectorHash(block_gen, output, uniq=uniq)
-        return hl
-
-    @staticmethod
-    def fromData(self, file_data):
-        return HashedFile(file_data['path'])

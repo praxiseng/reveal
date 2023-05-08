@@ -13,20 +13,15 @@ To see Match Set Analysis used with Data Flow Slices, see the related project
 REveal uses Python 3.10 or newer, and dependencies can be installed with:
 
 ```
-python -m pip install cbor2 pyelftools docopt pysimplegui intervaltree
+python -m pip install -r requirements.txt
 ```
 
 ## Create a Database
 
-Note: The custom CBOR-based database format is deprecated and is being replaced with a SQLite format.
-
-Note: The C++ version that works with the CBOR-based database is also being deprecated.
-
-
 To ingest a list of files into a database:
 
 ```
-py .\sql_db.py ingest hash_db.sqlite S:\share\sample_binaries\linux_bin\
+py main.py ingest hash_db.sqlite S:\share\sample_binaries\linux_bin\
 ```
 
 Note: The sample command was run from a Powershell prompt on a Windows box.  On Linux, substitute py with python3 and change the
@@ -53,36 +48,69 @@ Sample output:
 
 This output shows any operations that took over 0.5 seconds to process.
 
-## Search a Database
+## Create a Search Database
 
-To search, you need to specify both the hash database and a search database.  The search database will store the rolling
-hashes so that the search can use SQL join statements when attached to the hash database.
+A search compares a binary file against a hash database.  The search is performed in a search database, and all results
+are stored in that search database.  That search database can then be queried and visualized.
+
+The following command searches the `ls` binary against the `hash_db.sqlite` hash database, storing results in the 
+`search_ls.sqlite` search database.
 
 ```
-py .\sql_db.py search .\hash_db.sqlite search_ls.sqlite S:\share\sample_binaries\linux_bin\ls
+py main.py search .\hash_db.sqlite .\search_ls.sqlite S:\share\sample_binaries\linux_bin\ls
 ```
 
-The command will accumulate match lists for different file offsets, identify unique match sets, and launch the new
-graphical interface to visualize the file matches.
+The search command starts by determining which sections of the file have sufficient entropy.  Then it performs a rolling
+hash.  A rolling hash is a hash at every starting byte in the file for the length of the block size.  The `search`
+command inserts these hashes into a table in the search database, then finds matches by attaching to the hash database
+and performing a JOIN operation across tables.  The match results are then stored in another table for quick loading.
+
+
+Use the `--show` command to launch the GUI at the end.
 
 # Graphical Interface
+
+To launch the GUI on a search database, run the `show` subcommand:
+
+```
+py main.py show search_ls.sqlite
+```
 
 REveal now has a graphical interface to display matches.  With the `ls` binary compared to 900 Linux binaries, we can
 see how REveal can modularize parts of the binary based on match sets:
 
 ![REveal Sector Hashing GUI](img/REVeal_GUI.png)
 
-The GUI is broken up into two sections.  The top section shows the match counts on a logarithmic scale.  The x axis is 
-the byte offset within the file.  The white line shows where the mouse is hovering, selecting a byte offset in the file.
-The colorization is based on match set analysis.  Sections matching the same set of files will have the same color.
-Similar sets of files will have similar colors.
+The GUI is broken up into three sections: top, bottom left, and bottom right.
 
-The bottom section displays information about the selected byte offset:
-* File offset
+## Top Section
+
+The top section shows a visual representation of the bytes of the file
+* The x axis is the byte offset within the file.
+* The white line shows where the mouse is hovering, selecting a byte offset in the file to fill details in the lower
+left pane.
+* The ruler-like intervals show the location of various structures in the file
+  * PE/ELF headers, segments, sections, resources, etc
+* The colored graph describes matches
+  * The y axis is the count of matching files on a logarithmic scale.
+  * The colors describe _Match Families_
+    * A _Match Set_ is a list of files that match at a particular offset
+    * A Match Family is a group of similar match sets
+    * The display shows different parts of the input file `ls` matching different sets of files. 
+
+## Bottom Left Section
+
+The bottom left section displays information about the selected byte offset
+* The selected file offset, based on the mouse hovering on the top section
+* Various entropy measures
+  * All based on Shannon Entropy, normalized to a 0-to-1 scale
+  * They all measure a 512-byte window starting at the cursor offset.
+  * The Byte, Word, Dword, and Qword entropies measure the entropy of 1, 2, 4, and 8 byte values.
+  * NibLo and NibHi measure the entropy of the low and high 4 bits of each byte respectively.
 * Hex dump of the bytes.
   * Underlined bytes are affected by "zeroizing", where the bytes are zeroed before hashing.
 * Matches by count.
-  * This relates to a table that simply stores match count instead of storing every hash.
+  * This relates to a table that simply stores match count instead of storing the list of every file.
   * "Files by count" measures how many files in the database matched at that offset
   * "Hashes by count" measures how many times the hash was seen, including if seen multiple times in the same file.
   * These counts can be higher due to self-similar overlaps.
@@ -90,5 +118,52 @@ The bottom section displays information about the selected byte offset:
       files between the two sets, yet this the count will report 8. 
 * Matching files
   * A separate table stores the list of files by hash.
-  * In a future revision of REveal, high-count items will be pruned from this table
-  * The name of each file is listed, up to the first 50.
+  * The name of each file is listed, up to a limit.
+* Structure detail
+  * Detailed information about the intervals and items at the specified offset
+
+## Bottom Right Section
+
+The bottom right section lists the Match Set Families
+* 
+* They are sorted by descending size
+* There are 3 file counts:
+  * The number of items in the first match set of this family.  The first match set has the largest number of bytes.
+  * The union describes the list of all files seen in the family, regardless of how many bytes they match
+  * The intersect describes how many files were seen in every match set in the family
+* A short list of file names describes the list of files
+* A second list of files that were not in every match set describes the percent of bytes they were included in.
+* A list of ranges represented by the family.  The ranges are in `<length>+<size>` format.
+* Hovering the mouse over the match set families lists the full path of the files.
+
+# Malware Hunting
+
+The REveal GUI can be used to analyze sections of malware.  To demonstrate this, we downloaded 1358 files from 
+[Malware Bazaar](https://bazaar.abuse.ch/).  We then ingested those files into a sector hash database and searched a
+sample of AsyncRAT.
+
+![AsyncRAT sample matching a database of samples from MalwareBazaar](img/AsyncRAT.png)
+
+The GUI shows several match set families.  Clearly, different parts of the binary have different matching power.
+By hovering over the different sections, the hexdump will show some additional information:
+
+* The pink sections appear to be a list of function names for imports
+* The red sections match strings that are commands injected into the system, and an XML document (near the end of the file)
+* The blue, orange, and yellow sections appear to be unusual, obfuscated code sequences.
+
+
+# Feature Wishlist
+
+* Strings analysis (using [Language-Aware Strings](https://osdn.net/projects/sfnet_la-strings/releases/))
+* Fancy Tables
+  * Cells should be able to summarize multiple lines of detail, and expand when hovered
+  * For example, if files are indexed by hash, then they will have multiple names and paths from where they have been found
+* Disassembly, decompilation
+  * Use Ghidra or Binary Ninja to extract function ranges
+  * Show disassembly and decompilation when hovering
+* Flowslicer Integration
+  * Have a separate analysis to extract data flow slices into a database
+  * Display data flow slice information as a separate graph alongside the sector hash matches.
+* Debug Symbol Information
+  * If files in the match set have debug symbols, extract names and source code
+  * Summarize names and source in the bottom view

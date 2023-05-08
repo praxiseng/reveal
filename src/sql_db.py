@@ -407,11 +407,12 @@ class SearchDB:
     def rolling_hash(self,
                      file_path,
                      bs,
-                     entropy_threshold=0.2):
+                     entropy_threshold=0.2,
+                     zeroize=True):
 
         self.store_file_contents(file_path)
 
-        hf = HashedFile(file_path)
+        hf = HashedFile(file_path, zeroize=zeroize)
 
 
         sectors = hf.genRollingBlocks(bs, step=1, short_blocks=False, limit_range=None)
@@ -574,6 +575,7 @@ def search_file_in_hashdb(args, search_db):
     rebuild = args['--rebuild']
     hash_db_path = args['HASH_DB']
 
+    zeroize = not args['--no-zeroize']
     search_file = args['SEARCH_FILE']
 
     status.start_process('FindMatches', 'Finding Matches')
@@ -581,7 +583,7 @@ def search_file_in_hashdb(args, search_db):
     if rebuild:
         search_db.rebuild()
     if search_db.is_new:
-        search_db.rolling_hash(search_file, block_size)
+        search_db.rolling_hash(search_file, block_size, zeroize=zeroize)
 
     matches = search_db.run_search_query(hash_db_path)
     #search_db.close()
@@ -596,6 +598,7 @@ def show_gui(matches, block_size, search_file_path, search_file_bytes, fid_looku
     except ImportError:
         print(f'ImportError while trying to import GUI')
         return
+
     with util.Profiler(15):
         offset_counts = matches_to_offset_counts(matches, block_size)
 
@@ -671,13 +674,12 @@ def is_exe_by_header(path):
             return True
     return False
 
-def ingest_files(hash_db_path, files_to_ingest, bs, only_exe, use_glob):
+def ingest_files(hash_db_path, files_to_ingest, bs, only_exe, use_glob, zeroize):
     hash_db = SQLHashDB(hash_db_path, False)
     n_files = 0
 
+    status.start_process('Ingesting', format_ingest, n_files=0, n_hashes=0, path='')
 
-    status.start_process('Ingesting', format_ingest,
-                         n_files=0, n_hashes=0, path='')
     for path in expand_paths(files_to_ingest, use_glob):
         status.update('Ingesting', n_files=n_files, n_hashes=hash_db.total_hashes_added)
 
@@ -696,7 +698,7 @@ def ingest_files(hash_db_path, files_to_ingest, bs, only_exe, use_glob):
         n_files += 1
         status.start_process('IngestFile', format_ingest_file, path=path, n_file_hashes=0)
         try:
-            hf = HashedFile(path)
+            hf = HashedFile(path, zeroize=zeroize)
             fid = hash_db.add_file(path, hf.getWholeFileHash())
             sector_gen = hf.genAlignedBlocks(bs=bs)
             hash_db.add_hash_blocks(fid, sector_gen)
@@ -728,13 +730,15 @@ Usage:
     sql_db ingest HASH_DB FILES... [options] [--exe] [--glob]
     sql_db import HASH_DB NSRL_DB [options]
     sql_db search HASH_DB SEARCH_DB SEARCH_FILE [options] [--show]
-    sql_db show SEARCH_DB [SEARCH_FILE]
+    sql_db show SEARCH_DB
 
 Options:
     --rebuild         When creating a database, delete that database and make a clean one.
                       This includes the HASH_DB when using "import" and the cached search
                       database when using "search"
     --blocksize SIZE  Sector block size [default: 128]
+    --zeroize         Use the 'zero-ize' option to remove x86_64 relative addresses [default: true]
+    --no-zeroize      Do not apply 'zero-ize' 
     --exe             Only process executable files (PE or ELF) for ingest
     --glob            Use globbing on the list of files for ingest
 """
@@ -747,9 +751,10 @@ def main():
     hash_db_path = args['HASH_DB']
 
     bs = int(args['--blocksize'])
+    zeroize = not args['--no-zeroize']
 
     if args['ingest']:
-        ingest_files(hash_db_path, args['FILES'], bs, args['--exe'], args['--glob'])
+        ingest_files(hash_db_path, args['FILES'], bs, args['--exe'], args['--glob'], zeroize)
 
     if args['import']:
         import_nsrl_db(hash_db_path, args['NSRL_DB'], args['--rebuild'])
@@ -762,18 +767,10 @@ def main():
 
         matches = search and search_file_in_hashdb(args, search_db)
 
-
         if show:
-            path = args['SEARCH_FILE']
-            contents = None
-
-            if not path:
-                path, contents = search_db.load_file_contents()
-
+            path, contents = search_db.load_file_contents()
             matches = matches or search_db.query_search_results()
             show_gui(matches, bs, path, contents, search_db.fid_lookup)
-
-
 
 
 if __name__ == "__main__":
