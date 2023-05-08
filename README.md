@@ -79,7 +79,7 @@ py main.py show search_ls.sqlite
 REveal now has a graphical interface to display matches.  With the `ls` binary compared to 900 Linux binaries, we can
 see how REveal can modularize parts of the binary based on match sets:
 
-![REveal Sector Hashing GUI](img/REVeal_GUI.png)
+![REveal Sector Hashing GUI](img/REveal_GUI.png)
 
 The GUI is broken up into three sections: top, bottom left, and bottom right.
 
