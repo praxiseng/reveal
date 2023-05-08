@@ -2,7 +2,7 @@ import itertools
 import math
 import string
 import sys
-import tkinter
+import tkinter as tk
 import traceback
 from typing import Callable
 
@@ -35,6 +35,61 @@ def my_log(x: int, max_value=1000, pixel_height=200) -> int:
 def visible_to_canvas(x1, x2) -> bool:
     return x2 > 0 and x1 < 10000
 
+
+class ToolTip:
+    """ Create a tooltip for a given widget
+
+    (inspired by https://stackoverflow.com/a/36221216)
+    """
+
+    def __init__(self, widget: tk.Widget, text, timeout=1000):
+        self.widget = widget
+        self.text = text
+        self.timeout = timeout
+        #self.wraplength = wraplength if wraplength else widget.winfo_screenwidth() // 2
+        self.tipwindow = None
+        self.id = None
+        self.x = self.y = 0
+        self.widget.bind("<Enter>", self.enter)
+        self.widget.bind("<Leave>", self.leave)
+        self.widget.bind("<ButtonPress>", self.leave)
+
+    def enter(self, event=None):
+        self.schedule()
+
+    def leave(self, event=None):
+        self.unschedule()
+        self.hidetip()
+
+    def schedule(self):
+        self.unschedule()
+        self.id = self.widget.after(self.timeout, self.showtip)
+
+    def unschedule(self):
+        if self.id:
+            self.widget.after_cancel(self.id)
+        self.id = None
+
+    def showtip(self):
+        if self.tipwindow:
+            return
+        #x = self.widget.winfo_rootx() + 20
+        #y = self.widget.winfo_rooty() + self.widget.winfo_height() + 1
+        x = self.widget.winfo_pointerx() + 20
+        y = self.widget.winfo_pointery() + 2
+        self.tipwindow = tk.Toplevel(self.widget)
+        self.tipwindow.wm_overrideredirect(True)
+        self.tipwindow.wm_geometry("+%d+%d" % (x, y))
+        label = tk.Label(self.tipwindow, text=self.text, justify=tk.LEFT,
+                         background="#ffffe0", relief=tk.SOLID, borderwidth=1)
+        label.pack()
+
+    def hidetip(self):
+        if self.tipwindow:
+            self.tipwindow.destroy()
+        self.tipwindow = None
+
+
 class MatchHistogram:
     """
     MatchHistogram represents match counts and match sets for a search of a particular file against a single
@@ -49,7 +104,7 @@ class MatchHistogram:
                  cumulative_counts: list[sql_db.OffsetCount],
                  match_sets: list[MatchSet],
                  group_family_limit = 100,
-                 group_family_threshold = 0.95):
+                 group_family_threshold = 0.85):
 
         self.fid_lookup = fid_lookup
         self.cumulative_counts = cumulative_counts
@@ -158,6 +213,7 @@ class MatchHistogram:
 
         print(f'Grouping {len(self.match_sets)} match sets')
 
+        '''
         for ms in self.match_sets:
             if ms.family:
                 continue
@@ -173,24 +229,48 @@ class MatchHistogram:
 
             if len(self.match_set_families) >= self.group_family_limit:
                 break
+        '''
+
+        # Match sets are sorted by most-bytes-first.
+        # TODO: consider clustering algorithms.  Set comparisons have arbitrarily high dimensionality, so picking
+        # a good algorithm may be tricky.
+        for ms in self.match_sets:
+            if self.match_set_families:
+                family_scores = []
+                for family in self.match_set_families:
+                    similarity = family.first.similarity(ms)
+                    family_scores.append((similarity, family))
+                highest_score, highest_family = sorted(family_scores, key=lambda x:-x[0])[0]
+                if highest_score > self.group_family_threshold:
+                    highest_family.add(ms)
+                    continue
+            if len(self.match_set_families) < self.group_family_limit:
+                self.match_set_families.append(MatchSetFamily(ms))
 
         self.match_set_families = sorted(self.match_set_families, key=lambda ms:-ms.total_bytes())
 
         return self.match_set_families
 
-    def print_set(self, txt: sg.MLine, file_set, max1=10, max2=50, text_color=None,
+    def format_set(self, file_set, max1=10, max2=50,
                   byte_match_count = None,
-                  total_bytes = None):
+                  total_bytes = None,
+                  hide_if_over = True):
         if not file_set:
             return
 
-        if len(file_set) >= max2:
+        if len(file_set) >= max2 and hide_if_over:
             return
 
+
+        show_path = len(file_set) < max1
+        if hide_if_over and max1 >= max2:
+            show_path = True
+
+
         def file_txt(fid):
-            if len(file_set) < max1:
+            if show_path:
                 s = self.fid_lookup(fid).path
-            elif len(file_set) < max2:
+            else:
                 s = self.fid_lookup(fid).name
             if byte_match_count and fid in byte_match_count:
                 byte_match = byte_match_count[fid]
@@ -199,21 +279,31 @@ class MatchHistogram:
 
             return s
 
-        joinchar = '\n' if len(file_set) < max1 else ' '
+        joinchar = '\n' if show_path else ' '
 
         fid_txt_count = [(file_txt(fid), (byte_match_count or {}).get(fid, None)) for fid in file_set]
         if byte_match_count:
             # sort by descending byte count
-            fid_txt_count = sorted(fid_txt_count, key=lambda x: -x[1])
+            fid_txt_count = sorted(fid_txt_count, key=lambda x: -(x[1] or 0))
         else:
             fid_txt_count = sorted(fid_txt_count, key=lambda x: x[0])
+        if not hide_if_over:
+            fid_txt_count = fid_txt_count[:max1]
 
         file_txts = [f_text for f_text, match_count in fid_txt_count]
-        txt.print(joinchar.join(file_txts), font=(font_name, font_size-2), text_color=text_color)
+        return joinchar.join(file_txts)
+
+    def print_set(self, txt: sg.MLine, file_set, max1=10, max2=50, text_color=None,
+                  byte_match_count=None,
+                  total_bytes=None,
+                  bgcolor=None):
+        msg = self.format_set(file_set, max1, max2, byte_match_count, total_bytes)
+        if msg:
+            txt.print(msg, font=(font_name, font_size), text_color=text_color, background_color=bgcolor)
 
     def describe_match_sets(self, txt: sg.MLine):
         families = self.group_families()
-        for family in families:
+        for index, family in enumerate(families):
             #if not family.first.color:
             #    continue
 
@@ -228,30 +318,31 @@ class MatchHistogram:
 
             lengths = f' File counts: {len(first_set)} first, {len(union_files)} union, {len(intersect_files)} intersect'
 
-            description = f'Match Set Family {bytes_txt:5} {len(family.members)} sets {lengths}'
-            txt.print(description, background_color=(family.first.color or 'white'), text_color='black')
+            description = f'Match Set Family {index}: {bytes_txt:5} {len(family.members)} sets {lengths}'
+            bgcolor = (family.first.color or ('white' if index%2 else 'grey50'))
+            txt.print(description, background_color=bgcolor, text_color='black')
 
-            ranges = family.all_ranges()
-            if ranges:
-                txt_start = '1 range:' if len(ranges) == 1 else f'{len(ranges)} ranges:'
-                range_text = txt_start + ' '.join([f'{lo:x}-{hi:x}' for lo, hi in ranges[:50]])
-                txt.print(range_text, font=(font_name, font_size-3))
-
-            max1 = 10
-            max2 = 50
-            self.print_set(txt, intersect_files, max1, max2)
+            max1 = 2
+            max2 = 20
+            self.print_set(txt, intersect_files, max1, max2, text_color='black', bgcolor=bgcolor)
 
             extra_fids = union_files - intersect_files
-            max1 = max(max1 - len(intersect_files), 3)
-            max2 = max(max2-len(intersect_files), 5)
+            max1 = max(max1 - len(intersect_files), 1)
+            max2 = max(max2-len(intersect_files), 2)
 
             match_bytes = family.count_match_bytes(extra_fids)
             #match_bytes = sorted(match_bytes, key=lambda x:-x[1]) # sort by number of bytes descending
 
-            self.print_set(txt, extra_fids, max1=max1, max2=max2, text_color='grey14',
+            self.print_set(txt, extra_fids, max1=max1, max2=max2, text_color='grey24',
                            byte_match_count=dict(match_bytes),
-                           total_bytes=total_bytes)
+                           total_bytes=total_bytes,
+                           bgcolor=bgcolor)
 
+            ranges = family.all_ranges()
+            if ranges:
+                txt_start = '1 range:' if len(ranges) == 1 else f'{len(ranges)} ranges:'
+                range_text = txt_start + ' '.join([f'{lo:x}+{hi-lo:x}' for lo, hi in ranges[:20]])
+                txt.print(range_text, font=(font_name, font_size), text_color='black', background_color=bgcolor)
 
 class FileView:
     """
@@ -262,16 +353,21 @@ class FileView:
     3. Known ranges/intervals, as parsed an input by analysis tools.
     """
 
-    def __init__(self, path, graph_name):
+    def __init__(self, path, data, graph_name):
+        assert(isinstance(path, str))
+
         self.path = path
         self.graph_name = graph_name
 
-        self.elf_thunks = ELFThunks(path)
+        if data:
+            self.contents = data
+        else:
+            with open(path, 'rb') as fd:
+                self.contents = fd.read()
 
-        with open(path, 'rb') as fd:
-            self.contents = fd.read()
+        self.elf_thunks = ELFThunks(self.contents)
 
-        self.zeroized_file = filehash.MemFile(path, True).data
+        self.zeroized_file = filehash.MemFile(path, self.contents, True).data
 
         # self.values is updated when GUIView reads the event loop
         self.values = {self.graph_name: (0, 0)}
@@ -493,8 +589,8 @@ class GUIView:
     object and a bottom text box.
     """
 
-    def __init__(self, file_path):
-        self.view1 = FileView(file_path, 'view1')
+    def __init__(self, file_path, file_bytes=None):
+        self.view1 = FileView(file_path, file_bytes, 'view1')
 
         screen_width, screen_height = sg.Window.get_screen_size()
 
@@ -527,6 +623,8 @@ class GUIView:
                                 resizable=True,
                                 background_color='light grey')
         self.window.refresh()
+
+        self.tt: ToolTip | None = None
 
     def set_counts(self,
                    fid_lookup,
@@ -734,9 +832,14 @@ class GUIView:
     def ishex(self, c):
         return c.lower() in '0123456789abcdef'
 
-    def click_text(self):
-        tktext = self.bottom_text2.TKText
-        tktext: tkinter.Text
+    def show_tip(self, text):
+        if self.tt:
+            self.tt.unschedule()
+            self.tt.hidetip()
+        self.tt = ToolTip(self.bottom_text2.widget, text, timeout=5)
+        self.tt.showtip()
+
+    def expand_hex(self, tktext: tk.Text):
         cur = tktext.index('current')
 
         row, col = cur.split('.')
@@ -766,11 +869,60 @@ class GUIView:
 
         word = tktext.get(f'{row}.{lo}', f'{row}.{hi}')
 
-        offset = int(word, 16)
+        return int(word, 16)
 
-        print(f'Current = {cur} {type(cur)} {char}  {offset:x}')
+    def find_match_family(self, tktext: tk.Text) -> int | None:
+        cur = tktext.index('current')
+        row, col = cur.split('.')
 
-        self.view1.zoom_to(offset)
+        row = int(row)
+        while row >= 0:
+            find_txt = 'Match Set Family '
+            begin_line = tktext.get(f'{row}.0', f'{row}.{len(find_txt)}')
+            if begin_line == find_txt:
+                next_line = tktext.get(f'{row}.{len(find_txt)}', f'{row}.{len(find_txt)+8}')
+                match_family_index = int(next_line.split(':')[0])
+
+                return match_family_index
+
+            #print(f'Line begin {begin_line}')
+            row -= 1
+
+    def click_text(self):
+        offset = self.expand_hex(self.bottom_text2.TKText)
+
+        if offset is not None:
+            self.show_tip(f'Hello, world {offset}')
+            self.view1.zoom_to(offset)
+
+    def hover_text(self):
+        match_family_index = self.find_match_family(self.bottom_text2.TKText)
+        if match_family_index is None:
+            return
+
+        family = self.view1.match_histogram.match_set_families[match_family_index]
+        union_files = family.union_file_set()
+        intersect_files = family.intersection_file_set()
+        first_set = family.first_file_set()
+
+        max1 = 50
+        max2 = 50
+        msg = self.view1.match_histogram.format_set(intersect_files, max1, max2)
+
+        extra_files = union_files - intersect_files
+        max1 = max(max1 - len(intersect_files), 5)
+        max2 = max(max2 - len(intersect_files), 5)
+
+        match_bytes = family.count_match_bytes(extra_files)
+        msg2 = self.view1.match_histogram.format_set(extra_files, max1, max2,
+                                                     byte_match_count=dict(match_bytes),
+                                                     total_bytes=family.total_bytes())
+
+        if msg2:
+            msg = f'{msg}\n\n{msg2}'
+
+        self.show_tip(msg)
+
 
     def event_loop(self):
         self.adjust_sizes()
@@ -780,7 +932,8 @@ class GUIView:
         #self.bottom_text2.set_right_click_menu(["Hello", "World"])
 
         actions = [
-            (self.bottom_text2, "<Button-1>", self.click_text)
+            (self.bottom_text2, "<Button-1>", self.click_text),
+            (self.bottom_text2, "<Motion>", self.hover_text),
         ]
 
         event_actions = {}

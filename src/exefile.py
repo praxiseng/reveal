@@ -1,3 +1,4 @@
+import io
 import string
 import struct
 import sys
@@ -91,23 +92,28 @@ def format_printable(name):
 
 
 class ELFThunks:
-    def __init__(self, path):
+    def __init__(self, path_or_bytes):
         self.file_to_va_thunk = None
         self.thunks = []
         self.structs = []
 
-        self.try_parse_elf(path)
+        self.try_parse_elf(path_or_bytes)
 
         if not self.thunks:
-            self.try_parse_pe(path)
+            self.try_parse_pe(path_or_bytes)
 
     def try_parse_pe(self, path):
         import pefile
-        pe = pefile.PE(path)
+        if isinstance(path, bytes):
+            pe = pefile.PE(data=path)
+        elif isinstance(path, str):
+            pe = pefile.PE(path)
+        elif isinstance(path, io.BufferedIOBase):
+            pe = pefile.pe(data=path.read())
+        else:
+            raise TypeError('Invalid file input')
 
         # print(f"Parsing PE {pe}")
-
-
 
         section_thunk = Thunk('File Offset', 'RVA')
         struct_thunk = Thunk('File Offset', 'RVA')
@@ -140,8 +146,7 @@ class ELFThunks:
 
             rva, thunk_meta = section_thunk.translate(lo)
 
-            meta = dict(name = struct.name,
-                        struct=str(struct))
+            meta = dict(name=struct.name, struct=str(struct))
 
             if rva is None:
                 rva_range = (0, 0)
@@ -165,60 +170,66 @@ class ELFThunks:
 
                     struct_thunk.add((offset, size), (0,0), meta)
 
-    def try_parse_elf(self, path):
+    def try_parse_elf2(self, file_obj):
         from elftools.elf.elffile import ELFFile
         from elftools.common.exceptions import ELFError
-        with open(path, 'rb') as f:
-            try:
-                elffile = ELFFile(f)
-            except ELFError:
-                return
+        try:
+            elffile = ELFFile(file_obj)
+        except ELFError:
+            return
 
-            section_thunk = Thunk('File Offset', 'Virtual Address')
-            segment_thunk = Thunk('File Offset', 'Virtual Address')
-            # self.file_to_va_thunk = self.section_thunk
-            self.thunks = [section_thunk, segment_thunk]
+        section_thunk = Thunk('File Offset', 'Virtual Address')
+        segment_thunk = Thunk('File Offset', 'Virtual Address')
+        # self.file_to_va_thunk = self.section_thunk
+        self.thunks = [section_thunk, segment_thunk]
 
-            for sect in elffile.iter_sections():
-                flags = sect.header['sh_flags']
-                flag_map = [(2, 'A'), (1, 'W'), (4, 'X')]
-                flag_txt = ''.join(txt if (flags & mask) else ' ' for mask, txt in flag_map)
+        for sect in elffile.iter_sections():
+            flags = sect.header['sh_flags']
+            flag_map = [(2, 'A'), (1, 'W'), (4, 'X')]
+            flag_txt = ''.join(txt if (flags & mask) else ' ' for mask, txt in flag_map)
 
-                sh_type = sect.header['sh_type']
-                sh_addr = sect.header['sh_addr']  # first virtual address
-                sh_offset = sect.header['sh_offset']  # file offset
-                sh_size = sect.header['sh_size']
+            sh_type = sect.header['sh_type']
+            sh_addr = sect.header['sh_addr']  # first virtual address
+            sh_offset = sect.header['sh_offset']  # file offset
+            sh_size = sect.header['sh_size']
 
-                allocated = (flags & 2) != 0
-                has_file_bytes = 'SHT_NOBITS' != sh_type
+            allocated = (flags & 2) != 0
+            has_file_bytes = 'SHT_NOBITS' != sh_type
 
-                mem_size = sh_size if allocated else 0
-                file_size = sh_size if has_file_bytes else 0
+            mem_size = sh_size if allocated else 0
+            file_size = sh_size if has_file_bytes else 0
 
-                meta = dict(name = sect.name or sh_type, struct = dict(sect.header))
-                segment_thunk.add((sh_offset,file_size), (sh_addr,mem_size), meta)
+            meta = dict(name=sect.name or sh_type, struct=dict(sect.header))
+            segment_thunk.add((sh_offset, file_size), (sh_addr, mem_size), meta)
 
-                #print(f'Section {sect.name:20} {flag_txt} {sh_offset:6x}+{file_size:<6x}  {sh_addr:6x}+{mem_size:<6x} {sect.header}')
+            # print(f'Section {sect.name:20} {flag_txt} {sh_offset:6x}+{file_size:<6x}  {sh_addr:6x}+{mem_size:<6x} {sect.header}')
 
-            for seg in elffile.iter_segments():
-                p_type = seg.header['p_type']
-                p_offset = seg.header['p_offset']
-                p_vaddr = seg.header['p_vaddr']
-                p_paddr = seg.header['p_paddr']
-                p_filesz = seg.header['p_filesz']
-                p_memsz = seg.header['p_memsz']
+        for seg in elffile.iter_segments():
+            p_type = seg.header['p_type']
+            p_offset = seg.header['p_offset']
+            p_vaddr = seg.header['p_vaddr']
+            p_paddr = seg.header['p_paddr']
+            p_filesz = seg.header['p_filesz']
+            p_memsz = seg.header['p_memsz']
 
-                flags = seg.header['p_flags']
+            flags = seg.header['p_flags']
 
-                flagmap = [(4, 'R'), (2, 'W'), (1, 'X')]
-                flagtxt = ''.join(txt if (flags & mask) else ' ' for mask, txt in flagmap)
+            flagmap = [(4, 'R'), (2, 'W'), (1, 'X')]
+            flagtxt = ''.join(txt if (flags & mask) else ' ' for mask, txt in flagmap)
 
-                meta = dict(name = p_type, struct = dict(seg.header))
-                section_thunk.add((p_offset, p_filesz), (p_vaddr, p_memsz), meta)
+            meta = dict(name=p_type, struct=dict(seg.header))
+            section_thunk.add((p_offset, p_filesz), (p_vaddr, p_memsz), meta)
 
+            # print(f'Segment {p_type:20} {flagtxt} {p_offset:6x}+{p_filesz:<6x} {p_vaddr:6x}+{p_memsz:<6x} {dict(seg.header)}')
 
-                #print(f'Segment {p_type:20} {flagtxt} {p_offset:6x}+{p_filesz:<6x} {p_vaddr:6x}+{p_memsz:<6x} {dict(seg.header)}')
-
+    def try_parse_elf(self, path):
+        if isinstance(path, bytes):
+            self.try_parse_elf2(io.BytesIO(path))
+        elif isinstance(path, str):
+            with open(path, 'rb') as file_obj:
+                self.try_parse_elf2(file_obj)
+        elif isinstance(path, io.BufferedIOBase):
+            self.try_parse_elf2(path)
 
     def find_thunks(self, address, only_nearest=True):
         for thunk in self.thunks:

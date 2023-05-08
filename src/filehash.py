@@ -33,11 +33,14 @@ class Sector:
 
 
 class MemFile:
-    def __init__(self, path, zeroize):
+    def __init__(self, path, data, zeroize):
         self.n_removed = 0
 
-        with open(path, 'rb') as fd:
-            self.data = fd.read()
+        if data:
+            self.data = data
+        else:
+            with open(path, 'rb') as fd:
+                self.data = fd.read()
 
         self.offset = 0
 
@@ -79,6 +82,7 @@ class MemFile:
 
         n_removed = 0
 
+        # Convert to a bytearray so that it will be read/write
         self.data = bytearray(self.data)
 
         relcall = 0xe8
@@ -187,7 +191,7 @@ class HashedFile:
     def openFile(self):
         # return open(self.path, 'rb')
         if not self.file_data:
-            self.file_data = MemFile(self.path, rg.globs.ZEROIZE_X86_PC_REL)
+            self.file_data = MemFile(self.path, None, rg.globs.ZEROIZE_X86_PC_REL)
         return self.file_data
 
     def getWholeFileHash(self):

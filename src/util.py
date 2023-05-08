@@ -78,7 +78,7 @@ class Status:
         txt = self.process_txts.get(process_name, '')
         self.vars['elapsed'] = self.getTimeDelta(process_name)
 
-        prefix = f'{self.getTimeDelta(process_name):5.2f}  '
+        prefix = f'{self.getTimeDeltaTxt(process_name):5}  '
 
         # Either txt is a format string or a callback function
         fx = txt.format if isinstance(txt, str) else txt
@@ -87,6 +87,21 @@ class Status:
 
     def getTimeDelta(self, process_name):
         return time.time() - self.start_times[process_name]
+
+    def getTimeDeltaTxt(self, process_name):
+        delta = self.getTimeDelta(process_name)
+        if delta < 10:
+            return f'{delta:4.2f}s'
+        if delta < 60:
+            return f'{delta:4.1f}s'
+
+        seconds = int(delta)
+        minutes = seconds // 60
+        if seconds < 3600:
+            return f'{minutes}:{seconds%60:02}'
+        hours = minutes // 60
+        return f'{hours}H{minutes%60}M'
+
 
     def getOuterTimeDelta(self):
         return self.getTimeDelta(self.active_processes[0])

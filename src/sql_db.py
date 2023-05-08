@@ -15,7 +15,6 @@ from match_sets import MatchSet
 
 import docopt
 
-import gui
 import util
 
 from filehash import Sector, HashedFile
@@ -86,7 +85,8 @@ class SQLHashDB:
             name TEXT,
             path TEXT,
             file_hash TEXT,
-            metadata_id INTEGER
+            metadata_id INTEGER,
+            json_data TEXT
         )
         ''',
         '''
@@ -176,7 +176,14 @@ class SQLHashDB:
             SELECT SRC.hash_id, SRC.offset, SRC.file_id
             FROM HASHFILES_INGEST AS SRC;
         """)
+        self.db_connection.commit()
+
+    def cleanup(self):
         self.db_connection.execute("DELETE FROM HASHFILES_INGEST")
+        self.db_connection.commit()
+
+    def vacuum(self):
+        self.db_connection.execute("VACUUM")
 
     def convert_nsrl_hashfiles(self,
                                input_db: sqlite3.Connection):
@@ -330,7 +337,16 @@ class SearchDB:
         name TEXT,
         path TEXT,
         file_hash TEXT,
-        metadata_id INTEGER
+        metadata_id INTEGER,
+        json_data TEXT
+    )
+    ''','''
+    CREATE TABLE "FILE_CONTENTS" (
+        file_id INTEGER,
+        name TEXT,
+        path TEXT,
+        json_data TEXT,
+        contents BLOB
     )
     ''']
 
@@ -365,11 +381,39 @@ class SearchDB:
         self.delete()
         self.open()
 
+    def store_file_contents(self, file_path):
+        insert_query = "INSERT INTO FILE_CONTENTS (name, path, contents) VALUES (?, ?, ?)"
+
+        with open(file_path, 'rb') as fd:
+            contents = fd.read()
+
+        name = os.path.basename(file_path)
+        query_data = [(name, file_path, contents)]
+        self.db_connection.executemany(insert_query, query_data)
+        self.db_connection.commit()
+
+    def load_file_contents(self):
+        file_query = '''SELECT name, path, contents FROM FILE_CONTENTS'''
+
+        res = self.db_connection.execute(file_query)
+        data = res.fetchone()
+        if data is None:
+            return None
+
+        name, path, contents = data
+        return path, contents
+
+
     def rolling_hash(self,
                      file_path,
                      bs,
                      entropy_threshold=0.2):
+
+        self.store_file_contents(file_path)
+
         hf = HashedFile(file_path)
+
+
         sectors = hf.genRollingBlocks(bs, step=1, short_blocks=False, limit_range=None)
 
         # block_gen = self.filter_sector_entropy(block_gen, block_size, threshold=entropy_threshold)
@@ -396,6 +440,8 @@ class SearchDB:
         if new_records:
             self.db_connection.executemany(insert_query, sorted(new_records))
             self.db_connection.commit()
+            n_records += len(new_records)
+            status.update('RollingHash', n_hashes=n_records)
 
         status.finish_process('RollingHash')
 
@@ -544,8 +590,12 @@ def search_file_in_hashdb(args, search_db):
 
     return matches
 
-def show_gui(matches, block_size, search_file, fid_lookup):
-
+def show_gui(matches, block_size, search_file_path, search_file_bytes, fid_lookup):
+    try:
+        import gui
+    except ImportError:
+        print(f'ImportError while trying to import GUI')
+        return
     with util.Profiler(15):
         offset_counts = matches_to_offset_counts(matches, block_size)
 
@@ -555,7 +605,7 @@ def show_gui(matches, block_size, search_file, fid_lookup):
         status.print(f'Lengths: {len(offset_counts)} {len(cumulative_counts)} {len(match_sets)}')
 
         status.print(f'Initializing GUI')
-        gui_view = gui.GUIView(search_file)
+        gui_view = gui.GUIView(search_file_path, search_file_bytes)
         gui_view.set_counts(fid_lookup, cumulative_counts, match_sets)
 
     status.print(f'Entering GUI event loop')
@@ -579,10 +629,38 @@ def expand_paths(paths, use_globs = False):
             else:
                 yield path
 
+labels_kmb = ('', 'K', 'M', 'B', 'T', 'Q')
+def format_5digit(number, labels=labels_kmb):
+    for i, label in enumerate(labels):
+        magnitude = (1000**i)
+        if i and number < 100*magnitude:
+            return f'{number/magnitude:4.1f}{label}'
+        if number < 10000*magnitude:
+            return f'{int(number//magnitude)}{label}'
+    return str(number)
+
+
+def format_4digit(number, labels=labels_kmb):
+    for i, label in enumerate(labels):
+        magnitude = (1000**i)
+        if i and number < 10*magnitude:
+            print("A")
+            return f'{number/magnitude:3.1f}{label}'
+        if number < 1000*magnitude:
+            return f'{int(number//magnitude)}{label}'
+    print("C")
+    return str(number)
 
 def format_ingest(n_files, n_hashes, elapsed, path, **kwargs):
-    return f'{n_files:5} files, {n_hashes:8} hashes, {n_hashes / (elapsed or 1):5.0f} hash/s'
 
+    n_hash_txt = format_5digit(n_hashes)
+    hash_rate_txt = format_4digit(n_hashes // (elapsed or 1))
+
+    return f'{n_files:5} files {n_hash_txt:>5} hash {hash_rate_txt:>4}/s'
+
+def format_ingest_file(n_file_hashes, path, **kwargs):
+    file_hash_txt = format_5digit(n_file_hashes)
+    return f'{file_hash_txt:>5} {path}'
 
 def is_exe_by_header(path):
     with open(path, 'rb') as fd:
@@ -604,12 +682,19 @@ def ingest_files(hash_db_path, files_to_ingest, bs, only_exe, use_glob):
         status.update('Ingesting', n_files=n_files, n_hashes=hash_db.total_hashes_added)
 
         if only_exe:
-            is_exe = is_exe_by_header(path)
+            try:
+                is_exe = is_exe_by_header(path)
+            except FileNotFoundError:
+                print(f'\nFile not found: {path}')
+                continue
+            except Exception as e:
+                print(f'\nCould not open file: {path}\n{e}')
+                continue
             if not is_exe:
                 continue
 
         n_files += 1
-        status.start_process('IngestFile', 'File: {n_file_hashes:7} hashes {path}', path=path, n_file_hashes=0)
+        status.start_process('IngestFile', format_ingest_file, path=path, n_file_hashes=0)
         try:
             hf = HashedFile(path)
             fid = hash_db.add_file(path, hf.getWholeFileHash())
@@ -621,11 +706,17 @@ def ingest_files(hash_db_path, files_to_ingest, bs, only_exe, use_glob):
 
     status.finish_process('Ingesting', n_files=n_files, n_hashes=hash_db.total_hashes_added)
 
-
-
     status.start_process('FinalizingIngest', 'Finalizing ingest by sorting into final table')
     hash_db.finalize_ingest()
     status.finish_process('FinalizingIngest')
+
+    status.start_process('Cleanup', 'Cleaning up')
+    hash_db.cleanup()
+    status.finish_process('Cleanup')
+
+    status.start_process('Vacuum', 'Vacuuming')
+    hash_db.vacuum()
+    status.finish_process('Vacuum')
 
     hash_db.populate_hashcount()
 
@@ -637,7 +728,7 @@ Usage:
     sql_db ingest HASH_DB FILES... [options] [--exe] [--glob]
     sql_db import HASH_DB NSRL_DB [options]
     sql_db search HASH_DB SEARCH_DB SEARCH_FILE [options] [--show]
-    sql_db show SEARCH_DB SEARCH_FILE
+    sql_db show SEARCH_DB [SEARCH_FILE]
 
 Options:
     --rebuild         When creating a database, delete that database and make a clean one.
@@ -671,9 +762,16 @@ def main():
 
         matches = search and search_file_in_hashdb(args, search_db)
 
+
         if show:
+            path = args['SEARCH_FILE']
+            contents = None
+
+            if not path:
+                path, contents = search_db.load_file_contents()
+
             matches = matches or search_db.query_search_results()
-            show_gui(matches, bs, args['SEARCH_FILE'], search_db.fid_lookup)
+            show_gui(matches, bs, path, contents, search_db.fid_lookup)
 
 
 
