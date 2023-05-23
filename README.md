@@ -21,7 +21,7 @@ python -m pip install -r requirements.txt
 To ingest a list of files into a database:
 
 ```
-py reveal.py ingest hash_db.sqlite \path\to\binaries\
+py reveal.py ingest database.db \path\to\binaries\
 ```
 
 Note: The sample command was run from a Powershell prompt on a Windows box.  On Linux, substitute py with python3 and 
@@ -35,16 +35,16 @@ To use globbing rules, add the `--glob` flag.  Then the paths may contain glob r
 
 Sample output:
 ```
- 4.84     92 files,   137947 hashes, 28517 hash/s  0.71  File:   46439 hashes S:\share\sample_binaries\linux_bin\cmake
- 5.88    102 files,   187396 hashes, 31868 hash/s  0.70  File:   47620 hashes S:\share\sample_binaries\linux_bin\cpack
- 7.00    109 files,   240438 hashes, 34361 hash/s  0.81  File:   55190 hashes S:\share\sample_binaries\linux_bin\ctest
-11.61    158 files,   334313 hashes, 28784 hash/s  2.43  File:  312436 hashes S:\share\sample_binaries\linux_bin\emacs-gtk
-14.62    216 files,   679111 hashes, 46444 hash/s  0.84  File:   65940 hashes S:\share\sample_binaries\linux_bin\gdb
-22.14    362 files,   938023 hashes, 42364 hash/s  0.51  File:    6730 hashes S:\share\sample_binaries\linux_bin\lshw
-29.77    504 files,  1166263 hashes, 39174 hash/s  0.62  File:   42895 hashes S:\share\sample_binaries\linux_bin\python3.8
-31.79    509 files,  1260824 hashes, 39657 hash/s  1.29  File:  126849 hashes S:\share\sample_binaries\linux_bin\qemu-system-i386
-33.14    510 files,  1387673 hashes, 41869 hash/s  1.35  File:  127150 hashes S:\share\sample_binaries\linux_bin\qemu-system-x86_64
-40.37    651 files,  1604279 hashes, 39740 hash/s  1.81  File:  191997 hashes S:\share\sample_binaries\linux_bin\snap
+ 4.84     92 files,   137947 hashes, 28517 hash/s  0.71  File:   46439 hashes \path\to\binaries\cmake
+ 5.88    102 files,   187396 hashes, 31868 hash/s  0.70  File:   47620 hashes \path\to\binaries\cpack
+ 7.00    109 files,   240438 hashes, 34361 hash/s  0.81  File:   55190 hashes \path\to\binaries\ctest
+11.61    158 files,   334313 hashes, 28784 hash/s  2.43  File:  312436 hashes \path\to\binaries\emacs-gtk
+14.62    216 files,   679111 hashes, 46444 hash/s  0.84  File:   65940 hashes \path\to\binaries\gdb
+22.14    362 files,   938023 hashes, 42364 hash/s  0.51  File:    6730 hashes \path\to\binaries\lshw
+29.77    504 files,  1166263 hashes, 39174 hash/s  0.62  File:   42895 hashes \path\to\binaries\python3.8
+31.79    509 files,  1260824 hashes, 39657 hash/s  1.29  File:  126849 hashes \path\to\binaries\qemu-system-i386
+33.14    510 files,  1387673 hashes, 41869 hash/s  1.35  File:  127150 hashes \path\to\binaries\qemu-system-x86_64
+40.37    651 files,  1604279 hashes, 39740 hash/s  1.81  File:  191997 hashes \path\to\binaries\snap
 52.99    900 files,  2165876 hashes, 40876 hash/s
  6.65  Finalizing ingest by sorting into final table
 ```
@@ -56,27 +56,26 @@ This output shows any operations that took over 0.5 seconds to process.
 A search compares a binary file against a hash database.  The search is performed in a search database, and all results
 are stored in that search database.  That search database can then be queried and visualized.
 
-The following command searches the `ls` binary against the `hash_db.sqlite` hash database, storing results in the 
-`search_ls.sqlite` search database.
+The following command searches the `ls` binary against the `database.db` hash database, storing results in the 
+`search_ls.db` search database.
 
 ```
-py main.py search .\hash_db.sqlite .\search_ls.sqlite S:\share\sample_binaries\linux_bin\ls
+py reveal.py search database.db search_ls.db \path\to\bin\ls
 ```
 
 The search command starts by determining which sections of the file have sufficient entropy.  Then it performs a rolling
 hash.  A rolling hash is a hash at every starting byte in the file for the length of the block size.  The `search`
 command inserts these hashes into a table in the search database, then finds matches by attaching to the hash database
-and performing a JOIN operation across tables.  The match results are then stored in another table for quick loading.
+and performing a JOIN operation across tables.  The match results are then stored in another table in the search 
+database for quick loading.
 
-
-Use the `--show` command to launch the GUI at the end.
 
 # Graphical Interface
 
 To launch the GUI on a search database, run the `show` subcommand:
 
 ```
-py main.py show search_ls.sqlite
+py reveal.py show search_ls.db
 ```
 
 REveal now has a graphical interface to display matches.  With the `ls` binary compared to 900 Linux binaries, we can
@@ -170,3 +169,37 @@ By hovering over the different sections, the hexdump will show some additional i
 * Debug Symbol Information
   * If files in the match set have debug symbols, extract names and source code
   * Summarize names and source in the bottom view
+
+
+# Flowslicer Integration
+
+This feature is experimental.  It adds flowslicer's data-flow slicing for an indexing/search option.  Output is still
+text-based.
+
+Flowslicer requires a licenced version of BinaryNinja with headless capability.  Flowslicer currently works with 
+version 3.2.3814, so you may need to downgrade by going to Edit > Preferences > Update Channel, select the channel
+"Latest Binary Ninja release" and select version 3.2.3814.  Also, [install the Binary Ninja API to your python
+interpreter](https://docs.binary.ninja/dev/batch.html).
+
+Run the following commands in the REveal folder to checkout flowslicer:
+
+```
+git submodule init
+git submodule update
+```
+
+Then run the ingest with the `--slice` option:
+```
+py reveal.py ingest database.db \path\to\binaries\ --slice
+```
+This process can take a long time, as it serially loads each binary into Binary Ninja to process.
+
+Then you can run a search against the database with the --slice option: 
+
+```
+py reveal.py search database.db search_ls.db \path\to\bin\ls --slice
+```
+
+A detailed text output will be displayed, including:
+* Raw Data flow slices, and the list of addresses backing that slice
+* A formatted tree of match set families, match sets, and slices.
