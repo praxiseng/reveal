@@ -1,0 +1,4 @@
+[submodule "flowslicer"]
+	path = flowslicer
+	url = https://github.com/praxiseng/flowslicer
+	branch = reveal_integration

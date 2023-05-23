@@ -1,7 +1,7 @@
 from typing import Generator
 
-from util import *
-from entropy import *
+from src.util import *
+from src.entropy import *
 import struct
 
 

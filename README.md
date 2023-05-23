@@ -21,14 +21,17 @@ python -m pip install -r requirements.txt
 To ingest a list of files into a database:
 
 ```
-py main.py ingest hash_db.sqlite S:\share\sample_binaries\linux_bin\
+py reveal.py ingest hash_db.sqlite \path\to\binaries\
 ```
 
-Note: The sample command was run from a Powershell prompt on a Windows box.  On Linux, substitute py with python3 and change the
-path separator to "/".
+Note: The sample command was run from a Powershell prompt on a Windows box.  On Linux, substitute py with python3 and 
+change the path separator to `/`.
 
-Note: The above command will recursively enumerate all files in any specified folders, not just executables.
+The above command will recursively enumerate all files in any specified folders, not just executables. To filter 
+only executable files (PE and ELF), use the `--exe` flag.
 
+To use globbing rules, add the `--glob` flag.  Then the paths may contain glob rules.  For example, the path
+`\path\**\*.dll` will recursively find all files with the `.dll` extension.  
 
 Sample output:
 ```

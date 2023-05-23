@@ -215,6 +215,29 @@ def get_whole_file_hash(path):
         return file_hash(fd.read())
 
 
+labels_kmb = ('', 'K', 'M', 'B', 'T', 'Q')
+
+
+def format_5digit(number, labels=labels_kmb):
+    for i, label in enumerate(labels):
+        magnitude = (1000**i)
+        if i and number < 100*magnitude:
+            return f'{number/magnitude:4.1f}{label}'
+        if number < 10000*magnitude:
+            return f'{int(number//magnitude)}{label}'
+    return str(number)
+
+
+def format_4digit(number, labels=labels_kmb):
+    for i, label in enumerate(labels):
+        magnitude = (1000**i)
+        if i and number < 10*magnitude:
+            return f'{number/magnitude:3.1f}{label}'
+        if number < 1000*magnitude:
+            return f'{int(number//magnitude)}{label}'
+    print("C")
+    return str(number)
+
 
 class Uniq:
     def __init__(self):

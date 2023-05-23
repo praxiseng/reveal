@@ -1,4 +1,4 @@
-from util import color
+from src.util import color
 import array
 from collections import defaultdict
 from math import log2

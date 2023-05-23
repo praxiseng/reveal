@@ -8,22 +8,22 @@ from typing import Callable
 
 import PySimpleGUI
 
-import filehash
+from src import filehash
 
 import PySimpleGUI as sg
-import sql_db
+from src import sql_db
 
 import cProfile as profile
 import pstats
 
 from intervaltree import Interval, IntervalTree
 
-from match_sets import MatchSet, MatchSetFamily
+from src.match_sets import MatchSet, MatchSetFamily, cluster_match_sets
 
-from exefile import ELFThunks
-import entropy
+from src.exefile import ELFThunks
+from src import entropy
 
-import util
+from src import util
 
 font_name = 'Fira Code'
 font_size = 12
@@ -213,54 +213,21 @@ class MatchHistogram:
 
         print(f'Grouping {len(self.match_sets)} match sets')
 
-        '''
-        for ms in self.match_sets:
-            if ms.family:
-                continue
+        self.match_set_families = cluster_match_sets(self.match_sets, self.group_family_limit, self.group_family_threshold)
 
-            family = MatchSetFamily(ms)
-            self.match_set_families.append(family)
-
-            for other in self.match_sets:
-                if other.family:
-                    continue
-                if ms.similarity(other) > self.group_family_threshold:
-                    family.add(other)
-
-            if len(self.match_set_families) >= self.group_family_limit:
-                break
-        '''
-
-        # Match sets are sorted by most-bytes-first.
-        # TODO: consider clustering algorithms.  Set comparisons have arbitrarily high dimensionality, so picking
-        # a good algorithm may be tricky.
-        for ms in self.match_sets:
-            if self.match_set_families:
-                family_scores = []
-                for family in self.match_set_families:
-                    similarity = family.first.similarity(ms)
-                    family_scores.append((similarity, family))
-                highest_score, highest_family = sorted(family_scores, key=lambda x:-x[0])[0]
-                if highest_score > self.group_family_threshold:
-                    highest_family.add(ms)
-                    continue
-            if len(self.match_set_families) < self.group_family_limit:
-                self.match_set_families.append(MatchSetFamily(ms))
-
-        self.match_set_families = sorted(self.match_set_families, key=lambda ms:-ms.total_bytes())
+        self.match_set_families = sorted(self.match_set_families, key=lambda ms: -ms.total_bytes())
 
         return self.match_set_families
 
     def format_set(self, file_set, max1=10, max2=50,
-                  byte_match_count = None,
-                  total_bytes = None,
-                  hide_if_over = True):
+                   byte_match_count=None,
+                   total_bytes=None,
+                   hide_if_over=True):
         if not file_set:
             return
 
         if len(file_set) >= max2 and hide_if_over:
             return
-
 
         show_path = len(file_set) < max1
         if hide_if_over and max1 >= max2:

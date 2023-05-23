@@ -1,0 +1,8 @@
+cbor2
+pyelftools
+pefile
+docopt
+pysimplegui
+intervaltree
+pyzipper
+malwarebazaar
